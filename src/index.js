@@ -198,11 +198,56 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/services", async (_req, res) => {
+app.get("/services", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const customerId =
+    typeof req.query.customer_id === "string" ? req.query.customer_id.trim() : "";
+  const petId = typeof req.query.pet_id === "string" ? req.query.pet_id.trim() : "";
+  const serviceTypeId =
+    typeof req.query.service_type_id === "string"
+      ? req.query.service_type_id.trim()
+      : "";
+  const groomerId =
+    typeof req.query.groomer_id === "string" ? req.query.groomer_id.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`date <= $${params.length}`);
+  }
+
+  if (customerId) {
+    params.push(customerId);
+    filters.push(`customer_id = $${params.length}`);
+  }
+
+  if (petId) {
+    params.push(petId);
+    filters.push(`pet_id = $${params.length}`);
+  }
+
+  if (serviceTypeId) {
+    params.push(serviceTypeId);
+    filters.push(`service_type_id = $${params.length}`);
+  }
+
+  if (groomerId) {
+    params.push(groomerId);
+    filters.push(`groomer_id = $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `SELECT * FROM services ${whereClause} ORDER BY date DESC, created_at DESC`;
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM services ORDER BY date DESC, created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -736,11 +781,18 @@ app.delete("/v2/pets/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/service-types", async (_req, res) => {
+app.get("/v2/service-types", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const hasQuery = query.length > 0;
+  const sql = hasQuery
+    ? `SELECT * FROM service_types
+       WHERE name ILIKE $1
+       ORDER BY created_at DESC`
+    : "SELECT * FROM service_types ORDER BY created_at DESC";
+  const params = hasQuery ? [`%${query}%`] : [];
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM service_types ORDER BY created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -834,11 +886,18 @@ app.delete("/v2/service-types/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/payment-methods", async (_req, res) => {
+app.get("/v2/payment-methods", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const hasQuery = query.length > 0;
+  const sql = hasQuery
+    ? `SELECT * FROM payment_methods
+       WHERE name ILIKE $1
+       ORDER BY created_at DESC`
+    : "SELECT * FROM payment_methods ORDER BY created_at DESC";
+  const params = hasQuery ? [`%${query}%`] : [];
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM payment_methods ORDER BY created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -933,11 +992,56 @@ app.delete("/v2/payment-methods/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/services", async (_req, res) => {
+app.get("/v2/services", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const customerId =
+    typeof req.query.customer_id === "string" ? req.query.customer_id.trim() : "";
+  const petId = typeof req.query.pet_id === "string" ? req.query.pet_id.trim() : "";
+  const serviceTypeId =
+    typeof req.query.service_type_id === "string"
+      ? req.query.service_type_id.trim()
+      : "";
+  const groomerId =
+    typeof req.query.groomer_id === "string" ? req.query.groomer_id.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`date <= $${params.length}`);
+  }
+
+  if (customerId) {
+    params.push(customerId);
+    filters.push(`customer_id = $${params.length}`);
+  }
+
+  if (petId) {
+    params.push(petId);
+    filters.push(`pet_id = $${params.length}`);
+  }
+
+  if (serviceTypeId) {
+    params.push(serviceTypeId);
+    filters.push(`service_type_id = $${params.length}`);
+  }
+
+  if (groomerId) {
+    params.push(groomerId);
+    filters.push(`groomer_id = $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `SELECT * FROM services ${whereClause} ORDER BY date DESC, created_at DESC`;
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM services ORDER BY date DESC, created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -1065,11 +1169,27 @@ app.delete("/v2/services/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/suppliers", async (_req, res) => {
+app.get("/v2/suppliers", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const category = typeof req.query.category === "string" ? req.query.category.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (query) {
+    params.push(`%${query}%`);
+    filters.push(`name ILIKE $${params.length}`);
+  }
+
+  if (category) {
+    params.push(category);
+    filters.push(`category = $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `SELECT * FROM suppliers ${whereClause} ORDER BY created_at DESC`;
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM suppliers ORDER BY created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -1166,11 +1286,18 @@ app.delete("/v2/suppliers/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/expense-categories", async (_req, res) => {
+app.get("/v2/expense-categories", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const hasQuery = query.length > 0;
+  const sql = hasQuery
+    ? `SELECT * FROM expense_categories
+       WHERE name ILIKE $1
+       ORDER BY created_at DESC`
+    : "SELECT * FROM expense_categories ORDER BY created_at DESC";
+  const params = hasQuery ? [`%${query}%`] : [];
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM expense_categories ORDER BY created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);

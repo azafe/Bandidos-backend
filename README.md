@@ -35,6 +35,7 @@ npm run dev
 ## Endpoints
 - `GET /health` -> `{ ok: true }`
 - `GET /services` -> lista ordenada por `date` desc (tabla `services`)
+- `GET /services?from=YYYY-MM-DD&to=YYYY-MM-DD&customer_id=UUID&pet_id=UUID&service_type_id=UUID&groomer_id=UUID`
 - `POST /services`
 - `PUT /services/:id`
 - `DELETE /services/:id`
@@ -61,26 +62,31 @@ npm run dev
 - `PUT /v2/pets/:id`
 - `DELETE /v2/pets/:id`
 - `GET /v2/service-types`
+- `GET /v2/service-types?q=texto`
 - `GET /v2/service-types/:id`
 - `POST /v2/service-types`
 - `PUT /v2/service-types/:id`
 - `DELETE /v2/service-types/:id`
 - `GET /v2/payment-methods`
+- `GET /v2/payment-methods?q=texto`
 - `GET /v2/payment-methods/:id`
 - `POST /v2/payment-methods`
 - `PUT /v2/payment-methods/:id`
 - `DELETE /v2/payment-methods/:id`
 - `GET /v2/services`
+- `GET /v2/services?from=YYYY-MM-DD&to=YYYY-MM-DD&customer_id=UUID&pet_id=UUID&service_type_id=UUID&groomer_id=UUID`
 - `GET /v2/services/:id`
 - `POST /v2/services`
 - `PUT /v2/services/:id`
 - `DELETE /v2/services/:id`
 - `GET /v2/suppliers`
+- `GET /v2/suppliers?q=texto&category=texto`
 - `GET /v2/suppliers/:id`
 - `POST /v2/suppliers`
 - `PUT /v2/suppliers/:id`
 - `DELETE /v2/suppliers/:id`
 - `GET /v2/expense-categories`
+- `GET /v2/expense-categories?q=texto`
 - `GET /v2/expense-categories/:id`
 - `POST /v2/expense-categories`
 - `PUT /v2/expense-categories/:id`
