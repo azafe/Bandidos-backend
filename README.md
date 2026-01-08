@@ -49,11 +49,13 @@ npm run dev
 - `PUT /v2/employees/:id`
 - `DELETE /v2/employees/:id`
 - `GET /v2/customers`
+- `GET /v2/customers?q=texto` -> filtra por nombre/email/tel
 - `GET /v2/customers/:id`
 - `POST /v2/customers`
 - `PUT /v2/customers/:id`
 - `DELETE /v2/customers/:id`
 - `GET /v2/pets`
+- `GET /v2/pets?customer_id=UUID&q=texto` -> filtra por cliente y nombre/raza
 - `GET /v2/pets/:id`
 - `POST /v2/pets`
 - `PUT /v2/pets/:id`

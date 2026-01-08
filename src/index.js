@@ -511,11 +511,18 @@ app.delete("/v2/employees/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/customers", async (_req, res) => {
+app.get("/v2/customers", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const hasQuery = query.length > 0;
+  const sql = hasQuery
+    ? `SELECT * FROM customers
+       WHERE name ILIKE $1 OR email ILIKE $1 OR phone ILIKE $1
+       ORDER BY created_at DESC`
+    : "SELECT * FROM customers ORDER BY created_at DESC";
+  const params = hasQuery ? [`%${query}%`] : [];
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM customers ORDER BY created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -612,9 +619,27 @@ app.delete("/v2/customers/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/pets", async (_req, res) => {
+app.get("/v2/pets", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const customerId = typeof req.query.customer_id === "string" ? req.query.customer_id.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (customerId) {
+    params.push(customerId);
+    filters.push(`customer_id = $${params.length}`);
+  }
+
+  if (query) {
+    params.push(`%${query}%`);
+    filters.push(`(name ILIKE $${params.length} OR breed ILIKE $${params.length})`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `SELECT * FROM pets ${whereClause} ORDER BY created_at DESC`;
+
   try {
-    const result = await pool.query("SELECT * FROM pets ORDER BY created_at DESC");
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
