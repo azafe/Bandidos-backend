@@ -1,5 +1,6 @@
 import "dotenv/config";
 import pg from "pg";
+import { buildPoolConfig } from "../src/dbConfig.js";
 
 const { Pool } = pg;
 
@@ -8,9 +9,7 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
+const pool = new Pool(buildPoolConfig(process.env.DATABASE_URL));
 
 try {
   const result = await pool.query("select now() as now");

@@ -18,6 +18,10 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres
 FRONTEND_ORIGIN=*
 PORT=3000
 ```
+Notas:
+- Para proveedores como Supabase, suele venir `?sslmode=require` en `DATABASE_URL`.
+- Si quieres verificar certificados, define `DATABASE_SSL_REJECT_UNAUTHORIZED=true`.
+- Para certificados propios, define `DATABASE_SSL_CA=archivoCA.crt` (o usa el archivo incluido).
 
 ## Base de datos
 Ejecuta el SQL de creacion en tu base (Supabase):
