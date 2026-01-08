@@ -352,6 +352,185 @@ app.get("/me", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/reports/summary", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const includeFixedRaw =
+    typeof req.query.include_fixed === "string" ? req.query.include_fixed.trim() : "";
+  const includeFixed = includeFixedRaw ? includeFixedRaw !== "false" : true;
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`date <= $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  try {
+    const servicesResult = await pool.query(
+      `SELECT COALESCE(SUM(price), 0) AS total
+       FROM services ${whereClause}`,
+      params
+    );
+    const dailyResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM daily_expenses ${whereClause}`,
+      params
+    );
+    const fixedResult = includeFixed
+      ? await pool.query(
+          "SELECT COALESCE(SUM(amount), 0) AS total FROM fixed_expenses WHERE status = 'active'"
+        )
+      : { rows: [{ total: 0 }] };
+
+    const servicesTotal = Number(servicesResult.rows[0]?.total ?? 0);
+    const dailyTotal = Number(dailyResult.rows[0]?.total ?? 0);
+    const fixedTotal = Number(fixedResult.rows[0]?.total ?? 0);
+
+    res.json({
+      services_total: servicesTotal,
+      daily_expenses_total: dailyTotal,
+      fixed_expenses_total: fixedTotal,
+      net_total: servicesTotal - dailyTotal - fixedTotal
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/reports/daily", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`date <= $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         COALESCE(s.date, d.date) AS date,
+         COALESCE(s.services_total, 0) AS services_total,
+         COALESCE(d.daily_expenses_total, 0) AS daily_expenses_total,
+         COALESCE(s.services_total, 0) - COALESCE(d.daily_expenses_total, 0) AS net_total
+       FROM (
+         SELECT date, SUM(price) AS services_total
+         FROM services
+         ${whereClause}
+         GROUP BY date
+       ) s
+       FULL OUTER JOIN (
+         SELECT date, SUM(amount) AS daily_expenses_total
+         FROM daily_expenses
+         ${whereClause}
+         GROUP BY date
+       ) d ON s.date = d.date
+       ORDER BY date DESC`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/reports/by-groomer", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`s.date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`s.date <= $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         e.id AS groomer_id,
+         e.name AS groomer_name,
+         COUNT(s.id) AS services_count,
+         COALESCE(SUM(s.price), 0) AS total
+       FROM services s
+       LEFT JOIN employees e ON s.groomer_id = e.id
+       ${whereClause}
+       GROUP BY e.id, e.name
+       ORDER BY total DESC`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/reports/by-customer", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`s.date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`s.date <= $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         c.id AS customer_id,
+         c.name AS customer_name,
+         COUNT(s.id) AS services_count,
+         COALESCE(SUM(s.price), 0) AS total
+       FROM services s
+       JOIN customers c ON s.customer_id = c.id
+       ${whereClause}
+       GROUP BY c.id, c.name
+       ORDER BY total DESC`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
 app.get("/services", async (req, res) => {
   const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
   const to = typeof req.query.to === "string" ? req.query.to.trim() : "";

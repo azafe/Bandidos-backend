@@ -38,6 +38,10 @@ npm run dev
 - `POST /auth/register` -> `{ token, user }`
 - `POST /auth/login` -> `{ token, user }`
 - `GET /me` -> requiere `Authorization: Bearer <token>`
+- `GET /reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD&include_fixed=true`
+- `GET /reports/daily?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `GET /reports/by-groomer?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `GET /reports/by-customer?from=YYYY-MM-DD&to=YYYY-MM-DD`
 - `GET /services` -> lista ordenada por `date` desc (tabla `services`)
 - `GET /services?from=YYYY-MM-DD&to=YYYY-MM-DD&customer_id=UUID&pet_id=UUID&service_type_id=UUID&groomer_id=UUID`
 - `POST /services`
