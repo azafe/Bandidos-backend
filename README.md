@@ -86,11 +86,13 @@ npm run dev
 - `PUT /v2/expense-categories/:id`
 - `DELETE /v2/expense-categories/:id`
 - `GET /v2/daily-expenses`
+- `GET /v2/daily-expenses?from=YYYY-MM-DD&to=YYYY-MM-DD&category_id=UUID`
 - `GET /v2/daily-expenses/:id`
 - `POST /v2/daily-expenses`
 - `PUT /v2/daily-expenses/:id`
 - `DELETE /v2/daily-expenses/:id`
 - `GET /v2/fixed-expenses`
+- `GET /v2/fixed-expenses?category_id=UUID&status=active`
 - `GET /v2/fixed-expenses/:id`
 - `POST /v2/fixed-expenses`
 - `PUT /v2/fixed-expenses/:id`

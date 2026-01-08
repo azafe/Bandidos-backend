@@ -1266,11 +1266,34 @@ app.delete("/v2/expense-categories/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/daily-expenses", async (_req, res) => {
+app.get("/v2/daily-expenses", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const categoryId =
+    typeof req.query.category_id === "string" ? req.query.category_id.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (from) {
+    params.push(from);
+    filters.push(`date >= $${params.length}`);
+  }
+
+  if (to) {
+    params.push(to);
+    filters.push(`date <= $${params.length}`);
+  }
+
+  if (categoryId) {
+    params.push(categoryId);
+    filters.push(`category_id = $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `SELECT * FROM daily_expenses ${whereClause} ORDER BY date DESC, created_at DESC`;
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM daily_expenses ORDER BY date DESC, created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -1383,11 +1406,28 @@ app.delete("/v2/daily-expenses/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/fixed-expenses", async (_req, res) => {
+app.get("/v2/fixed-expenses", async (req, res) => {
+  const categoryId =
+    typeof req.query.category_id === "string" ? req.query.category_id.trim() : "";
+  const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+  const filters = [];
+  const params = [];
+
+  if (categoryId) {
+    params.push(categoryId);
+    filters.push(`category_id = $${params.length}`);
+  }
+
+  if (status) {
+    params.push(status);
+    filters.push(`status = $${params.length}`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `SELECT * FROM fixed_expenses ${whereClause} ORDER BY created_at DESC`;
+
   try {
-    const result = await pool.query(
-      "SELECT * FROM fixed_expenses ORDER BY created_at DESC"
-    );
+    const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
