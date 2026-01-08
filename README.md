@@ -17,6 +17,7 @@ Crea un archivo `.env` en la raiz basado en `.env.example`:
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres
 FRONTEND_ORIGIN=*
 PORT=3000
+JWT_SECRET=supersecret
 ```
 Notas:
 - Para proveedores como Supabase, suele venir `?sslmode=require` en `DATABASE_URL`.
@@ -34,6 +35,9 @@ npm run dev
 
 ## Endpoints
 - `GET /health` -> `{ ok: true }`
+- `POST /auth/register` -> `{ token, user }`
+- `POST /auth/login` -> `{ token, user }`
+- `GET /me` -> requiere `Authorization: Bearer <token>`
 - `GET /services` -> lista ordenada por `date` desc (tabla `services`)
 - `GET /services?from=YYYY-MM-DD&to=YYYY-MM-DD&customer_id=UUID&pet_id=UUID&service_type_id=UUID&groomer_id=UUID`
 - `POST /services`
@@ -44,6 +48,7 @@ npm run dev
 - `POST /v2/users`
 - `PUT /v2/users/:id`
 - `DELETE /v2/users/:id`
+- Nota: `/v2/users*` requiere token con rol `admin`.
 - `GET /v2/employees`
 - `GET /v2/employees/:id`
 - `POST /v2/employees`

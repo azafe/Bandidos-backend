@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { pool } from "./db.js";
 
@@ -14,12 +16,16 @@ const statusSchema = z.enum(["active", "inactive"]);
 
 const createUserSchema = z.object({
   email: z.string().email(),
-  password_hash: z.string().min(1),
+  password: z.string().min(6).optional(),
+  password_hash: z.string().min(1).optional(),
   role: z.string().min(1)
+}).refine((data) => data.password || data.password_hash, {
+  message: "password or password_hash is required"
 });
 
 const updateUserSchema = z.object({
   email: z.string().email().optional(),
+  password: z.string().min(6).optional(),
   password_hash: z.string().min(1).optional(),
   role: z.string().min(1).optional()
 });
@@ -178,6 +184,55 @@ const sendError = (res, status, message) => {
   return res.status(status).json({ status, message });
 };
 
+const jwtSecret = process.env.JWT_SECRET || "";
+
+const signToken = (user) => {
+  return jwt.sign(
+    { sub: user.id, role: user.role, email: user.email },
+    jwtSecret,
+    { expiresIn: "7d" }
+  );
+};
+
+const requireAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization || "";
+  const [scheme, token] = authHeader.split(" ");
+
+  if (!jwtSecret) {
+    return sendError(res, 500, "JWT_SECRET is not configured");
+  }
+
+  if (scheme !== "Bearer" || !token) {
+    return sendError(res, 401, "Unauthorized");
+  }
+
+  try {
+    const decoded = jwt.verify(token, jwtSecret);
+    req.user = decoded;
+    return next();
+  } catch (err) {
+    console.error(err);
+    return sendError(res, 401, "Unauthorized");
+  }
+};
+
+const requireRole = (role) => {
+  return (req, res, next) => {
+    if (!req.user || req.user.role !== role) {
+      return sendError(res, 403, "Forbidden");
+    }
+    return next();
+  };
+};
+
+const hashPassword = async (password) => {
+  return bcrypt.hash(password, 10);
+};
+
+const verifyPassword = async (password, passwordHash) => {
+  return bcrypt.compare(password, passwordHash);
+};
+
 const buildUpdate = (allowedFields, payload) => {
   const fields = [];
   const values = [];
@@ -196,6 +251,105 @@ const buildUpdate = (allowedFields, payload) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.post("/auth/register", async (req, res) => {
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6)
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  if (!jwtSecret) {
+    return sendError(res, 500, "JWT_SECRET is not configured");
+  }
+
+  const { email, password } = parsed.data;
+
+  try {
+    const passwordHash = await hashPassword(password);
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, role, created_at`,
+      [email, passwordHash, "user"]
+    );
+
+    const user = result.rows[0];
+    const token = signToken(user);
+    res.status(201).json({ token, user });
+  } catch (err) {
+    if (err.code === "23505") {
+      return sendError(res, 409, "Email already exists");
+    }
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/auth/login", async (req, res) => {
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6)
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  if (!jwtSecret) {
+    return sendError(res, 500, "JWT_SECRET is not configured");
+  }
+
+  const { email, password } = parsed.data;
+
+  try {
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+    if (result.rowCount === 0) {
+      return sendError(res, 401, "Invalid credentials");
+    }
+
+    const user = result.rows[0];
+    const ok = await verifyPassword(password, user.password_hash);
+    if (!ok) {
+      return sendError(res, 401, "Invalid credentials");
+    }
+
+    const token = signToken(user);
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        created_at: user.created_at
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/me", requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, email, role, created_at FROM users WHERE id = $1",
+      [req.user.sub]
+    );
+
+    if (result.rowCount === 0) {
+      return sendError(res, 404, "User not found");
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
 });
 
 app.get("/services", async (req, res) => {
@@ -360,9 +514,11 @@ app.delete("/services/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/users", async (_req, res) => {
+app.get("/v2/users", requireAuth, requireRole("admin"), async (_req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM users ORDER BY created_at DESC");
+    const result = await pool.query(
+      "SELECT id, email, role, created_at FROM users ORDER BY created_at DESC"
+    );
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -370,9 +526,12 @@ app.get("/v2/users", async (_req, res) => {
   }
 });
 
-app.get("/v2/users/:id", async (req, res) => {
+app.get("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM users WHERE id = $1", [req.params.id]);
+    const result = await pool.query(
+      "SELECT id, email, role, created_at FROM users WHERE id = $1",
+      [req.params.id]
+    );
     if (result.rowCount === 0) {
       return sendError(res, 404, "User not found");
     }
@@ -383,20 +542,21 @@ app.get("/v2/users/:id", async (req, res) => {
   }
 });
 
-app.post("/v2/users", async (req, res) => {
+app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
   const parsed = createUserSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const { email, password_hash, role } = parsed.data;
+  const { email, password, password_hash, role } = parsed.data;
+  const passwordHash = password ? await hashPassword(password) : password_hash;
 
   try {
     const result = await pool.query(
       `INSERT INTO users (email, password_hash, role)
        VALUES ($1, $2, $3)
-       RETURNING *`,
-      [email, password_hash, role]
+       RETURNING id, email, role, created_at`,
+      [email, passwordHash, role]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -405,13 +565,17 @@ app.post("/v2/users", async (req, res) => {
   }
 });
 
-app.put("/v2/users/:id", async (req, res) => {
+app.put("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
   const parsed = updateUserSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
   }
 
   const updates = parsed.data;
+  if (updates.password) {
+    updates.password_hash = await hashPassword(updates.password);
+    delete updates.password;
+  }
   const { fields, values, idx } = buildUpdate(
     ["email", "password_hash", "role"],
     updates
@@ -427,7 +591,7 @@ app.put("/v2/users/:id", async (req, res) => {
     const result = await pool.query(
       `UPDATE users SET ${fields.join(", ")}
        WHERE id = $${idx}
-       RETURNING *`,
+       RETURNING id, email, role, created_at`,
       values
     );
 
@@ -442,7 +606,7 @@ app.put("/v2/users/:id", async (req, res) => {
   }
 });
 
-app.delete("/v2/users/:id", async (req, res) => {
+app.delete("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
   try {
     const result = await pool.query("DELETE FROM users WHERE id = $1", [req.params.id]);
     if (result.rowCount === 0) {
