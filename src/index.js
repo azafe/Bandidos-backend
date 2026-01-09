@@ -210,6 +210,31 @@ const passwordResetService = createPasswordResetService({
   resetUrlBase: passwordResetUrlBase
 });
 
+const createRateLimiter = ({ windowMs, max }) => {
+  const hits = new Map();
+
+  const prune = (timestamps, now) => {
+    while (timestamps.length && now - timestamps[0] > windowMs) {
+      timestamps.shift();
+    }
+  };
+
+  return {
+    consume(key) {
+      const now = Date.now();
+      const timestamps = hits.get(key) ?? [];
+      prune(timestamps, now);
+      if (timestamps.length >= max) {
+        hits.set(key, timestamps);
+        return false;
+      }
+      timestamps.push(now);
+      hits.set(key, timestamps);
+      return true;
+    }
+  };
+};
+
 const forgotPasswordIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
 const forgotPasswordEmailLimiter = createRateLimiter({
   windowMs: 60 * 60 * 1000,
@@ -266,31 +291,6 @@ const hashPassword = async (password) => {
 
 const verifyPassword = async (password, passwordHash) => {
   return bcrypt.compare(password, passwordHash);
-};
-
-const createRateLimiter = ({ windowMs, max }) => {
-  const hits = new Map();
-
-  const prune = (timestamps, now) => {
-    while (timestamps.length && now - timestamps[0] > windowMs) {
-      timestamps.shift();
-    }
-  };
-
-  return {
-    consume(key) {
-      const now = Date.now();
-      const timestamps = hits.get(key) ?? [];
-      prune(timestamps, now);
-      if (timestamps.length >= max) {
-        hits.set(key, timestamps);
-        return false;
-      }
-      timestamps.push(now);
-      hits.set(key, timestamps);
-      return true;
-    }
-  };
 };
 
 const getClientIp = (req) => {
