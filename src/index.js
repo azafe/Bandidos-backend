@@ -56,18 +56,25 @@ const updateEmployeeSchema = z.object({
   notes: z.string().min(1).optional().nullable()
 });
 
+const emptyStringToNull = (value) => {
+  if (value === "") {
+    return null;
+  }
+  return value;
+};
+
 const createCustomerSchema = z.object({
   name: z.string().min(1),
-  phone: z.string().min(1).optional().nullable(),
-  email: z.string().email().optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const updateCustomerSchema = z.object({
   name: z.string().min(1).optional(),
-  phone: z.string().min(1).optional().nullable(),
-  email: z.string().email().optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const createPetSchema = z.object({
