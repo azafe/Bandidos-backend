@@ -18,6 +18,15 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres
 FRONTEND_ORIGIN=*
 PORT=3000
 JWT_SECRET=supersecret
+PASSWORD_RESET_URL_BASE=https://miapp.com/reset-password
+PASSWORD_RESET_TOKEN_TTL_MINUTES=60
+EMAIL_PROVIDER=smtp
+EMAIL_FROM=no-reply@miapp.com
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=usuario
+SMTP_PASS=clave
+SMTP_SECURE=false
 ```
 Notas:
 - Para proveedores como Supabase, suele venir `?sslmode=require` en `DATABASE_URL`.
@@ -27,6 +36,7 @@ Notas:
 ## Base de datos
 Ejecuta el SQL de creacion en tu base (Supabase):
 - `db/create_servicios.sql`
+- `db/create_schema.sql` (incluye usuarios, tokens de reset y auditoria)
 
 ## Ejecutar en local
 ```bash
@@ -37,6 +47,8 @@ npm run dev
 - `GET /health` -> `{ ok: true }`
 - `POST /auth/register` -> `{ token, user }`
 - `POST /auth/login` -> `{ token, user }`
+- `POST /auth/forgot-password` -> `{ ok: true }`
+- `POST /auth/reset-password` -> `{ ok: true }`
 - `GET /me` -> requiere `Authorization: Bearer <token>`
 - `GET /reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD&include_fixed=true`
 - `GET /reports/daily?from=YYYY-MM-DD&to=YYYY-MM-DD`

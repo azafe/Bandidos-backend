@@ -5,6 +5,14 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { pool } from "./db.js";
+import { createEmailClient } from "./email.js";
+import {
+  createPasswordResetService,
+  forgotPasswordSchema,
+  PasswordResetError,
+  resetPasswordSchema
+} from "./auth/passwordResetService.js";
+import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 
 const app = express();
 
@@ -185,6 +193,33 @@ const sendError = (res, status, message) => {
 };
 
 const jwtSecret = process.env.JWT_SECRET || "";
+const passwordResetTokenTtlMinutesRaw = Number(
+  process.env.PASSWORD_RESET_TOKEN_TTL_MINUTES || 60
+);
+const passwordResetTokenTtlMinutes = Number.isFinite(passwordResetTokenTtlMinutesRaw)
+  ? passwordResetTokenTtlMinutesRaw
+  : 60;
+const passwordResetUrlBase =
+  process.env.PASSWORD_RESET_URL_BASE || "https://miapp.com/reset-password";
+
+const emailClient = createEmailClient();
+const passwordResetService = createPasswordResetService({
+  store: createPasswordResetStore(pool),
+  sendResetEmail: emailClient.sendPasswordResetEmail,
+  tokenTtlMs: passwordResetTokenTtlMinutes * 60 * 1000,
+  resetUrlBase: passwordResetUrlBase
+});
+
+const forgotPasswordIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
+const forgotPasswordEmailLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 5
+});
+const resetPasswordIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
+const resetPasswordTokenLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 10
+});
 
 const signToken = (user) => {
   return jwt.sign(
@@ -231,6 +266,39 @@ const hashPassword = async (password) => {
 
 const verifyPassword = async (password, passwordHash) => {
   return bcrypt.compare(password, passwordHash);
+};
+
+const createRateLimiter = ({ windowMs, max }) => {
+  const hits = new Map();
+
+  const prune = (timestamps, now) => {
+    while (timestamps.length && now - timestamps[0] > windowMs) {
+      timestamps.shift();
+    }
+  };
+
+  return {
+    consume(key) {
+      const now = Date.now();
+      const timestamps = hits.get(key) ?? [];
+      prune(timestamps, now);
+      if (timestamps.length >= max) {
+        hits.set(key, timestamps);
+        return false;
+      }
+      timestamps.push(now);
+      hits.set(key, timestamps);
+      return true;
+    }
+  };
+};
+
+const getClientIp = (req) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.ip || "unknown";
 };
 
 const buildUpdate = (allowedFields, payload) => {
@@ -331,6 +399,58 @@ app.post("/auth/login", async (req, res) => {
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/auth/forgot-password", async (req, res) => {
+  const parsed = forgotPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const email = parsed.data.email.toLowerCase();
+  const ip = getClientIp(req);
+  const userAgent = req.get("user-agent") || "";
+
+  if (!forgotPasswordIpLimiter.consume(ip) || !forgotPasswordEmailLimiter.consume(email)) {
+    return sendError(res, 429, "Too many requests");
+  }
+
+  try {
+    await passwordResetService.requestReset(email, { ip, userAgent });
+  } catch (err) {
+    console.error(err);
+  }
+
+  res.json({ ok: true });
+});
+
+app.post("/auth/reset-password", async (req, res) => {
+  const parsed = resetPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const { token, newPassword } = parsed.data;
+  const ip = getClientIp(req);
+  const userAgent = req.get("user-agent") || "";
+
+  if (!resetPasswordIpLimiter.consume(ip) || !resetPasswordTokenLimiter.consume(token)) {
+    return sendError(res, 429, "Too many requests");
+  }
+
+  try {
+    await passwordResetService.resetPassword(token, newPassword, { ip, userAgent });
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof PasswordResetError && err.code === "weak_password") {
+      return sendError(res, 400, "Password does not meet requirements");
+    }
+    if (err instanceof PasswordResetError) {
+      return sendError(res, 400, "Invalid or expired token");
+    }
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
   }
 });
 
@@ -1529,7 +1649,13 @@ app.get("/v2/suppliers", async (req, res) => {
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-  const sql = `SELECT * FROM suppliers ${whereClause} ORDER BY created_at DESC`;
+  const sql = `SELECT suppliers.*,
+    payment_methods.name AS payment_method_name
+    FROM suppliers
+    LEFT JOIN payment_methods
+      ON payment_methods.id = suppliers.payment_method_id
+    ${whereClause}
+    ORDER BY suppliers.created_at DESC`;
 
   try {
     const result = await pool.query(sql, params);
@@ -1542,9 +1668,15 @@ app.get("/v2/suppliers", async (req, res) => {
 
 app.get("/v2/suppliers/:id", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM suppliers WHERE id = $1", [
-      req.params.id
-    ]);
+    const result = await pool.query(
+      `SELECT suppliers.*,
+        payment_methods.name AS payment_method_name
+        FROM suppliers
+        LEFT JOIN payment_methods
+          ON payment_methods.id = suppliers.payment_method_id
+        WHERE suppliers.id = $1`,
+      [req.params.id]
+    );
     if (result.rowCount === 0) {
       return sendError(res, 404, "Supplier not found");
     }
