@@ -21,6 +21,15 @@ app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 
 const statusSchema = z.enum(["active", "inactive"]);
+const agendaStatusSchema = z.enum([
+  "reserved",
+  "confirmed",
+  "finished",
+  "cancelled",
+  "no_show"
+]);
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
 const createUserSchema = z.object({
   email: z.string().email(),
@@ -93,6 +102,38 @@ const updatePetSchema = z.object({
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
   notes: z.string().min(1).optional().nullable()
+});
+
+const createAgendaSchema = z.object({
+  date: dateSchema,
+  time: timeSchema,
+  duration: z.coerce.number().int().min(1).optional().default(60),
+  pet_id: z.string().uuid().optional().nullable(),
+  pet_name: z.string().min(1),
+  breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  owner_name: z.string().min(1),
+  service_type_id: z.string().uuid(),
+  payment_method_id: z.string().uuid().optional().nullable(),
+  deposit_amount: z.coerce.number().min(0).optional().default(0),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  groomer_id: z.string().uuid().optional().nullable(),
+  status: agendaStatusSchema.optional().default("reserved")
+});
+
+const updateAgendaSchema = z.object({
+  date: dateSchema.optional(),
+  time: timeSchema.optional(),
+  duration: z.coerce.number().int().min(1).optional(),
+  pet_id: z.string().uuid().optional().nullable(),
+  pet_name: z.string().min(1).optional(),
+  breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  owner_name: z.string().min(1).optional(),
+  service_type_id: z.string().uuid().optional(),
+  payment_method_id: z.string().uuid().optional().nullable(),
+  deposit_amount: z.coerce.number().min(0).optional(),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  groomer_id: z.string().uuid().optional().nullable(),
+  status: agendaStatusSchema.optional()
 });
 
 const createServiceTypeSchema = z.object({
@@ -1239,6 +1280,171 @@ app.delete("/v2/pets/:id", async (req, res) => {
     ]);
     if (result.rowCount === 0) {
       return sendError(res, 404, "Pet not found");
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/agenda", async (req, res) => {
+  const date = typeof req.query.date === "string" ? req.query.date.trim() : "";
+  const parsedDate = dateSchema.safeParse(date);
+  if (!parsedDate.success) {
+    return sendError(res, 400, "Invalid date");
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT * FROM agenda_turnos WHERE date = $1 ORDER BY time ASC",
+      [parsedDate.data]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/agenda", async (req, res) => {
+  const parsed = createAgendaSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const {
+    date,
+    time,
+    duration,
+    pet_id,
+    pet_name,
+    breed,
+    owner_name,
+    service_type_id,
+    payment_method_id,
+    deposit_amount,
+    notes,
+    groomer_id,
+    status
+  } = parsed.data;
+
+  try {
+    const duplicate = await pool.query(
+      "SELECT id FROM agenda_turnos WHERE date = $1 AND time = $2 LIMIT 1",
+      [date, time]
+    );
+    if (duplicate.rowCount > 0) {
+      return sendError(res, 409, "Time slot already reserved");
+    }
+
+    const result = await pool.query(
+      `INSERT INTO agenda_turnos
+       (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
+        payment_method_id, deposit_amount, notes, groomer_id, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING *`,
+      [
+        date,
+        time,
+        duration,
+        pet_id ?? null,
+        pet_name,
+        breed ?? null,
+        owner_name,
+        service_type_id,
+        payment_method_id ?? null,
+        deposit_amount ?? 0,
+        notes ?? null,
+        groomer_id ?? null,
+        status
+      ]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.put("/agenda/:id", async (req, res) => {
+  const parsed = updateAgendaSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const updates = parsed.data;
+  const { fields, values, idx } = buildUpdate(
+    [
+      "date",
+      "time",
+      "duration",
+      "pet_id",
+      "pet_name",
+      "breed",
+      "owner_name",
+      "service_type_id",
+      "payment_method_id",
+      "deposit_amount",
+      "notes",
+      "groomer_id",
+      "status"
+    ],
+    updates
+  );
+
+  if (fields.length === 0) {
+    return sendError(res, 400, "No fields to update");
+  }
+
+  try {
+    if (updates.date || updates.time) {
+      const current = await pool.query(
+        "SELECT date, time FROM agenda_turnos WHERE id = $1",
+        [req.params.id]
+      );
+      if (current.rowCount === 0) {
+        return sendError(res, 404, "Agenda item not found");
+      }
+
+      const targetDate = updates.date ?? current.rows[0].date;
+      const targetTime = updates.time ?? current.rows[0].time;
+      const duplicate = await pool.query(
+        "SELECT id FROM agenda_turnos WHERE date = $1 AND time = $2 AND id <> $3 LIMIT 1",
+        [targetDate, targetTime, req.params.id]
+      );
+      if (duplicate.rowCount > 0) {
+        return sendError(res, 409, "Time slot already reserved");
+      }
+    }
+
+    values.push(req.params.id);
+
+    const result = await pool.query(
+      `UPDATE agenda_turnos SET ${fields.join(", ")}
+       WHERE id = $${idx}
+       RETURNING *`,
+      values
+    );
+
+    if (result.rowCount === 0) {
+      return sendError(res, 404, "Agenda item not found");
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.delete("/agenda/:id", async (req, res) => {
+  try {
+    const result = await pool.query("DELETE FROM agenda_turnos WHERE id = $1", [
+      req.params.id
+    ]);
+    if (result.rowCount === 0) {
+      return sendError(res, 404, "Agenda item not found");
     }
     res.json({ ok: true });
   } catch (err) {

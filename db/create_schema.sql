@@ -84,6 +84,26 @@ CREATE TABLE IF NOT EXISTS payment_methods (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS agenda_turnos (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  date date NOT NULL,
+  time time NOT NULL,
+  duration int NOT NULL DEFAULT 60,
+  pet_id uuid REFERENCES pets(id) ON DELETE SET NULL,
+  pet_name text NOT NULL,
+  breed text,
+  owner_name text NOT NULL,
+  service_type_id uuid NOT NULL REFERENCES service_types(id) ON DELETE RESTRICT,
+  payment_method_id uuid REFERENCES payment_methods(id) ON DELETE SET NULL,
+  deposit_amount numeric(12,2) NOT NULL DEFAULT 0 CHECK (deposit_amount >= 0),
+  notes text,
+  groomer_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  status text NOT NULL CHECK (
+    status IN ('reserved', 'confirmed', 'finished', 'cancelled', 'no_show')
+  ),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS services (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   date date NOT NULL,
@@ -137,6 +157,8 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_services_date ON services(date);
+CREATE INDEX IF NOT EXISTS idx_agenda_turnos_date ON agenda_turnos(date);
+CREATE INDEX IF NOT EXISTS idx_agenda_turnos_date_time ON agenda_turnos(date, time);
 CREATE INDEX IF NOT EXISTS idx_services_pet_id ON services(pet_id);
 CREATE INDEX IF NOT EXISTS idx_services_customer_id ON services(customer_id);
 CREATE INDEX IF NOT EXISTS idx_services_service_type_id ON services(service_type_id);
