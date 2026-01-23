@@ -78,17 +78,19 @@ const updateCustomerSchema = z.object({
 });
 
 const createPetSchema = z.object({
-  customer_id: z.string().uuid(),
   name: z.string().min(1),
   breed: z.string().min(1).optional().nullable(),
+  owner_name: z.string().min(1),
+  owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
   notes: z.string().min(1).optional().nullable()
 });
 
 const updatePetSchema = z.object({
-  customer_id: z.string().uuid().optional(),
   name: z.string().min(1).optional(),
   breed: z.string().min(1).optional().nullable(),
+  owner_name: z.string().min(1).optional(),
+  owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
   notes: z.string().min(1).optional().nullable()
 });
@@ -1136,14 +1138,8 @@ app.delete("/v2/customers/:id", async (req, res) => {
 
 app.get("/v2/pets", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const customerId = typeof req.query.customer_id === "string" ? req.query.customer_id.trim() : "";
   const filters = [];
   const params = [];
-
-  if (customerId) {
-    params.push(customerId);
-    filters.push(`customer_id = $${params.length}`);
-  }
 
   if (query) {
     params.push(`%${query}%`);
@@ -1183,14 +1179,14 @@ app.post("/v2/pets", async (req, res) => {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const { customer_id, name, breed, size, notes } = parsed.data;
+  const { name, breed, owner_name, owner_phone, size, notes } = parsed.data;
 
   try {
     const result = await pool.query(
-      `INSERT INTO pets (customer_id, name, breed, size, notes)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO pets (name, breed, owner_name, owner_phone, size, notes)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [customer_id, name, breed ?? null, size ?? null, notes ?? null]
+      [name, breed ?? null, owner_name, owner_phone ?? null, size ?? null, notes ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1207,7 +1203,7 @@ app.put("/v2/pets/:id", async (req, res) => {
 
   const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
-    ["customer_id", "name", "breed", "size", "notes"],
+    ["name", "breed", "owner_name", "owner_phone", "size", "notes"],
     updates
   );
 

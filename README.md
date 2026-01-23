@@ -77,7 +77,7 @@ npm run dev
 - `PUT /v2/customers/:id`
 - `DELETE /v2/customers/:id`
 - `GET /v2/pets`
-- `GET /v2/pets?customer_id=UUID&q=texto` -> filtra por cliente y nombre/raza
+- `GET /v2/pets?q=texto` -> filtra por nombre/raza
 - `GET /v2/pets/:id`
 - `POST /v2/pets`
 - `PUT /v2/pets/:id`

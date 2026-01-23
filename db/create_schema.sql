@@ -61,9 +61,11 @@ CREATE TABLE IF NOT EXISTS customers (
 
 CREATE TABLE IF NOT EXISTS pets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  customer_id uuid,
   name text NOT NULL,
   breed text,
+  owner_name text NOT NULL,
+  owner_phone text,
   size text,
   notes text,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -134,7 +136,6 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_pets_customer_id ON pets(customer_id);
 CREATE INDEX IF NOT EXISTS idx_services_date ON services(date);
 CREATE INDEX IF NOT EXISTS idx_services_pet_id ON services(pet_id);
 CREATE INDEX IF NOT EXISTS idx_services_customer_id ON services(customer_id);
