@@ -112,6 +112,7 @@ const createAgendaSchema = z.object({
   owner_name: z.string().min(1),
   service_type_id: z.string().uuid(),
   payment_method_id: z.string().uuid().optional().nullable(),
+  price: z.coerce.number().min(0).optional().nullable(),
   deposit_amount: z.coerce.number().min(0).optional().default(0),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
@@ -128,6 +129,7 @@ const updateAgendaSchema = z.object({
   owner_name: z.string().min(1).optional(),
   service_type_id: z.string().uuid().optional(),
   payment_method_id: z.string().uuid().optional().nullable(),
+  price: z.coerce.number().min(0).optional().nullable(),
   deposit_amount: z.coerce.number().min(0).optional(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
@@ -1379,6 +1381,7 @@ app.post("/agenda", async (req, res) => {
     owner_name,
     service_type_id,
     payment_method_id,
+    price,
     deposit_amount,
     notes,
     groomer_id,
@@ -1397,8 +1400,8 @@ app.post("/agenda", async (req, res) => {
     const result = await pool.query(
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
-        payment_method_id, deposit_amount, notes, groomer_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        payment_method_id, price, deposit_amount, notes, groomer_id, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         date,
@@ -1410,6 +1413,7 @@ app.post("/agenda", async (req, res) => {
         owner_name,
         service_type_id,
         payment_method_id ?? null,
+        price ?? null,
         deposit_amount ?? 0,
         notes ?? null,
         groomer_id ?? null,
@@ -1441,6 +1445,7 @@ app.put("/agenda/:id", async (req, res) => {
       "owner_name",
       "service_type_id",
       "payment_method_id",
+      "price",
       "deposit_amount",
       "notes",
       "groomer_id",
