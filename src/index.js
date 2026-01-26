@@ -21,13 +21,7 @@ app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 
 const statusSchema = z.enum(["active", "inactive"]);
-const agendaStatusSchema = z.enum([
-  "reserved",
-  "confirmed",
-  "finished",
-  "cancelled",
-  "no_show"
-]);
+const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled"]);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 

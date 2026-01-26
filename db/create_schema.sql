@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS agenda_turnos (
   notes text,
   groomer_id uuid REFERENCES employees(id) ON DELETE SET NULL,
   status text NOT NULL CHECK (
-    status IN ('reserved', 'confirmed', 'finished', 'cancelled', 'no_show')
+    status IN ('reserved', 'finished', 'cancelled')
   ),
   created_at timestamptz NOT NULL DEFAULT now()
 );
