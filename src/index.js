@@ -92,7 +92,7 @@ const createPetSchema = z.object({
   owner_name: z.string().min(1),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const updatePetSchema = z.object({
@@ -101,7 +101,7 @@ const updatePetSchema = z.object({
   owner_name: z.string().min(1).optional(),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const createAgendaSchema = z.object({
