@@ -1307,6 +1307,33 @@ app.get("/agenda", async (req, res) => {
   }
 });
 
+app.get("/agenda/summary", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const parsedFrom = dateSchema.safeParse(from);
+  const parsedTo = dateSchema.safeParse(to);
+
+  if (!parsedFrom.success || !parsedTo.success) {
+    return sendError(res, 400, "Invalid date range");
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         COALESCE(SUM(st.default_price), 0) AS total_estimated,
+         COALESCE(SUM(a.deposit_amount), 0) AS total_deposit
+       FROM agenda_turnos a
+       JOIN service_types st ON st.id = a.service_type_id
+       WHERE a.date BETWEEN $1 AND $2`,
+      [parsedFrom.data, parsedTo.data]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
 app.post("/agenda", async (req, res) => {
   const parsed = createAgendaSchema.safeParse(req.body);
   if (!parsed.success) {
