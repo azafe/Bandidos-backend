@@ -1284,6 +1284,28 @@ app.delete("/v2/pets/:id", async (req, res) => {
 
 app.get("/agenda", async (req, res) => {
   const date = typeof req.query.date === "string" ? req.query.date.trim() : "";
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+
+  if (from || to) {
+    const parsedFrom = dateSchema.safeParse(from);
+    const parsedTo = dateSchema.safeParse(to);
+    if (!parsedFrom.success || !parsedTo.success) {
+      return sendError(res, 400, "Invalid date range");
+    }
+
+    try {
+      const result = await pool.query(
+        "SELECT * FROM agenda_turnos WHERE date BETWEEN $1 AND $2 ORDER BY date ASC, time ASC",
+        [parsedFrom.data, parsedTo.data]
+      );
+      return res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      return sendError(res, 500, "Unexpected error");
+    }
+  }
+
   const parsedDate = dateSchema.safeParse(date);
   if (!parsedDate.success) {
     return sendError(res, 400, "Invalid date");

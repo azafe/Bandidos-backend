@@ -83,6 +83,7 @@ npm run dev
 - `PUT /v2/pets/:id`
 - `DELETE /v2/pets/:id`
 - `GET /agenda?date=YYYY-MM-DD`
+- `GET /agenda?from=YYYY-MM-DD&to=YYYY-MM-DD`
 - `GET /agenda/summary?from=YYYY-MM-DD&to=YYYY-MM-DD`
 - `POST /agenda`
 - `PUT /agenda/:id`
