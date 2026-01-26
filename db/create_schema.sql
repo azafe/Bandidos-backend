@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS pets (
   breed text,
   owner_name text NOT NULL,
   owner_phone text,
+  neutered boolean NOT NULL DEFAULT false,
+  behavior text,
   size text,
   notes text,
   created_at timestamptz NOT NULL DEFAULT now()

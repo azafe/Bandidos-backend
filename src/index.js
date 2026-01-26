@@ -85,6 +85,8 @@ const createPetSchema = z.object({
   breed: z.string().min(1).optional().nullable(),
   owner_name: z.string().min(1),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  neutered: z.boolean().optional().default(false),
+  behavior: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
@@ -94,6 +96,8 @@ const updatePetSchema = z.object({
   breed: z.string().min(1).optional().nullable(),
   owner_name: z.string().min(1).optional(),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  neutered: z.boolean().optional(),
+  behavior: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
@@ -1214,14 +1218,23 @@ app.post("/v2/pets", async (req, res) => {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const { name, breed, owner_name, owner_phone, size, notes } = parsed.data;
+  const { name, breed, owner_name, owner_phone, neutered, behavior, size, notes } = parsed.data;
 
   try {
     const result = await pool.query(
-      `INSERT INTO pets (name, breed, owner_name, owner_phone, size, notes)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO pets (name, breed, owner_name, owner_phone, neutered, behavior, size, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [name, breed ?? null, owner_name, owner_phone ?? null, size ?? null, notes ?? null]
+      [
+        name,
+        breed ?? null,
+        owner_name,
+        owner_phone ?? null,
+        neutered,
+        behavior ?? null,
+        size ?? null,
+        notes ?? null
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1238,7 +1251,7 @@ app.put("/v2/pets/:id", async (req, res) => {
 
   const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
-    ["name", "breed", "owner_name", "owner_phone", "size", "notes"],
+    ["name", "breed", "owner_name", "owner_phone", "neutered", "behavior", "size", "notes"],
     updates
   );
 
