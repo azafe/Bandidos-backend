@@ -130,6 +130,48 @@ CREATE TABLE IF NOT EXISTS suppliers (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS petshop_products (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  sku text,
+  category text,
+  supplier_id uuid REFERENCES suppliers(id) ON DELETE SET NULL,
+  cost numeric(12,2) NOT NULL DEFAULT 0,
+  price numeric(12,2) NOT NULL,
+  stock int NOT NULL DEFAULT 0,
+  stock_min int NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS petshop_sales (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  date date NOT NULL,
+  customer_id uuid REFERENCES customers(id) ON DELETE SET NULL,
+  payment_method_id uuid NOT NULL REFERENCES payment_methods(id) ON DELETE RESTRICT,
+  notes text,
+  total numeric(12,2) NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS petshop_sale_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sale_id uuid NOT NULL REFERENCES petshop_sales(id) ON DELETE CASCADE,
+  product_id uuid NOT NULL REFERENCES petshop_products(id) ON DELETE RESTRICT,
+  quantity int NOT NULL,
+  unit_price numeric(12,2) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS petshop_stock_movements (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  date date NOT NULL,
+  product_id uuid NOT NULL REFERENCES petshop_products(id) ON DELETE RESTRICT,
+  type text NOT NULL CHECK (type IN ('in', 'out', 'adjust')),
+  quantity int NOT NULL,
+  note text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS expense_categories (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL UNIQUE,
@@ -162,6 +204,12 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
 CREATE INDEX IF NOT EXISTS idx_services_date ON services(date);
 CREATE INDEX IF NOT EXISTS idx_agenda_turnos_date ON agenda_turnos(date);
 CREATE INDEX IF NOT EXISTS idx_agenda_turnos_date_time ON agenda_turnos(date, time);
+CREATE INDEX IF NOT EXISTS idx_petshop_products_supplier_id ON petshop_products(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_petshop_sales_date ON petshop_sales(date);
+CREATE INDEX IF NOT EXISTS idx_petshop_sale_items_sale_id ON petshop_sale_items(sale_id);
+CREATE INDEX IF NOT EXISTS idx_petshop_sale_items_product_id ON petshop_sale_items(product_id);
+CREATE INDEX IF NOT EXISTS idx_petshop_stock_movements_date ON petshop_stock_movements(date);
+CREATE INDEX IF NOT EXISTS idx_petshop_stock_movements_product_id ON petshop_stock_movements(product_id);
 CREATE INDEX IF NOT EXISTS idx_services_pet_id ON services(pet_id);
 CREATE INDEX IF NOT EXISTS idx_services_customer_id ON services(customer_id);
 CREATE INDEX IF NOT EXISTS idx_services_service_type_id ON services(service_type_id);

@@ -136,6 +136,55 @@ const updateAgendaSchema = z.object({
   status: agendaStatusSchema.optional()
 });
 
+const createPetshopProductSchema = z.object({
+  name: z.string().min(1),
+  sku: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  category: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  supplier_id: z.string().uuid().optional().nullable(),
+  cost: z.coerce.number().min(0).optional().default(0),
+  price: z.coerce.number().min(0),
+  stock: z.coerce.number().int().min(0).optional().default(0),
+  stock_min: z.coerce.number().int().min(0).optional().default(0)
+});
+
+const updatePetshopProductSchema = z.object({
+  name: z.string().min(1).optional(),
+  sku: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  category: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  supplier_id: z.string().uuid().optional().nullable(),
+  cost: z.coerce.number().min(0).optional(),
+  price: z.coerce.number().min(0).optional(),
+  stock: z.coerce.number().int().min(0).optional(),
+  stock_min: z.coerce.number().int().min(0).optional()
+});
+
+const createPetshopSaleSchema = z.object({
+  date: dateSchema,
+  customer_id: z.string().uuid().optional().nullable(),
+  payment_method_id: z.string().uuid(),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  total: z.coerce.number().min(0),
+  items: z
+    .array(
+      z.object({
+        product_id: z.string().uuid(),
+        quantity: z.coerce.number().int().min(1),
+        unit_price: z.coerce.number().min(0)
+      })
+    )
+    .min(1)
+});
+
+const stockMovementTypeSchema = z.enum(["in", "out", "adjust"]);
+
+const createPetshopStockMovementSchema = z.object({
+  date: dateSchema,
+  product_id: z.string().uuid(),
+  type: stockMovementTypeSchema,
+  quantity: z.coerce.number().int().min(0),
+  note: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+});
+
 const createServiceTypeSchema = z.object({
   name: z.string().min(1),
   default_price: z.coerce.number().min(0).optional().nullable()
@@ -1722,6 +1771,294 @@ app.delete("/v2/payment-methods/:id", async (req, res) => {
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/v2/petshop/products", async (_req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM petshop_products ORDER BY created_at DESC"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/petshop/products", async (req, res) => {
+  const parsed = createPetshopProductSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const { name, sku, category, supplier_id, cost, price, stock, stock_min } =
+    parsed.data;
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO petshop_products
+       (name, sku, category, supplier_id, cost, price, stock, stock_min)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        name,
+        sku ?? null,
+        category ?? null,
+        supplier_id ?? null,
+        cost ?? 0,
+        price,
+        stock ?? 0,
+        stock_min ?? 0
+      ]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.put("/v2/petshop/products/:id", async (req, res) => {
+  const parsed = updatePetshopProductSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const updates = parsed.data;
+  const { fields, values, idx } = buildUpdate(
+    ["name", "sku", "category", "supplier_id", "cost", "price", "stock", "stock_min"],
+    updates
+  );
+
+  if (fields.length === 0) {
+    return sendError(res, 400, "No fields to update");
+  }
+
+  values.push(req.params.id);
+  const updateFields = [...fields, "updated_at = now()"];
+
+  try {
+    const result = await pool.query(
+      `UPDATE petshop_products SET ${updateFields.join(", ")}
+       WHERE id = $${idx}
+       RETURNING *`,
+      values
+    );
+
+    if (result.rowCount === 0) {
+      return sendError(res, 404, "Product not found");
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.delete("/v2/petshop/products/:id", async (req, res) => {
+  try {
+    const result = await pool.query("DELETE FROM petshop_products WHERE id = $1", [
+      req.params.id
+    ]);
+    if (result.rowCount === 0) {
+      return sendError(res, 404, "Product not found");
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/v2/petshop/sales", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const parsedFrom = dateSchema.safeParse(from);
+  const parsedTo = dateSchema.safeParse(to);
+
+  if (!parsedFrom.success || !parsedTo.success) {
+    return sendError(res, 400, "Invalid date range");
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         s.*,
+         COALESCE(
+           json_agg(
+             json_build_object(
+               'id', si.id,
+               'product_id', si.product_id,
+               'quantity', si.quantity,
+               'unit_price', si.unit_price
+             )
+             ORDER BY si.id
+           ) FILTER (WHERE si.id IS NOT NULL),
+           '[]'
+         ) AS items
+       FROM petshop_sales s
+       LEFT JOIN petshop_sale_items si ON si.sale_id = s.id
+       WHERE s.date BETWEEN $1 AND $2
+       GROUP BY s.id
+       ORDER BY s.date DESC, s.created_at DESC`,
+      [parsedFrom.data, parsedTo.data]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/petshop/sales", async (req, res) => {
+  const parsed = createPetshopSaleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const { date, customer_id, payment_method_id, notes, total, items } = parsed.data;
+  const productIds = [...new Set(items.map((item) => item.product_id))];
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const products = await client.query(
+      "SELECT id, stock FROM petshop_products WHERE id = ANY($1::uuid[]) FOR UPDATE",
+      [productIds]
+    );
+
+    if (products.rowCount !== productIds.length) {
+      await client.query("ROLLBACK");
+      return sendError(res, 400, "Invalid product_id");
+    }
+
+    const saleResult = await client.query(
+      `INSERT INTO petshop_sales
+       (date, customer_id, payment_method_id, notes, total)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [date, customer_id ?? null, payment_method_id, notes ?? null, total]
+    );
+    const sale = saleResult.rows[0];
+    const saleItems = [];
+
+    for (const item of items) {
+      const itemResult = await client.query(
+        `INSERT INTO petshop_sale_items
+         (sale_id, product_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [sale.id, item.product_id, item.quantity, item.unit_price]
+      );
+      saleItems.push(itemResult.rows[0]);
+
+      await client.query(
+        `UPDATE petshop_products
+         SET stock = stock - $1,
+             updated_at = now()
+         WHERE id = $2`,
+        [item.quantity, item.product_id]
+      );
+    }
+
+    await client.query("COMMIT");
+    res.status(201).json({ ...sale, items: saleItems });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/v2/petshop/stock-movements", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const parsedFrom = dateSchema.safeParse(from);
+  const parsedTo = dateSchema.safeParse(to);
+
+  if (!parsedFrom.success || !parsedTo.success) {
+    return sendError(res, 400, "Invalid date range");
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT *
+       FROM petshop_stock_movements
+       WHERE date BETWEEN $1 AND $2
+       ORDER BY date DESC, created_at DESC`,
+      [parsedFrom.data, parsedTo.data]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/petshop/stock-movements", async (req, res) => {
+  const parsed = createPetshopStockMovementSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  const { date, product_id, type, quantity, note } = parsed.data;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const productResult = await client.query(
+      "SELECT * FROM petshop_products WHERE id = $1 FOR UPDATE",
+      [product_id]
+    );
+    if (productResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return sendError(res, 400, "Invalid product_id");
+    }
+
+    const product = productResult.rows[0];
+    let newStock = product.stock;
+    if (type === "in") {
+      newStock += quantity;
+    } else if (type === "out") {
+      newStock -= quantity;
+    } else {
+      newStock = quantity;
+    }
+
+    const updateResult = await client.query(
+      `UPDATE petshop_products
+       SET stock = $1,
+           updated_at = now()
+       WHERE id = $2
+       RETURNING *`,
+      [newStock, product_id]
+    );
+
+    const movementResult = await client.query(
+      `INSERT INTO petshop_stock_movements
+       (date, product_id, type, quantity, note)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [date, product_id, type, quantity, note ?? null]
+    );
+
+    await client.query("COMMIT");
+    res.status(201).json({
+      movement: movementResult.rows[0],
+      product: updateResult.rows[0]
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
   }
 });
 

@@ -88,6 +88,14 @@ npm run dev
 - `POST /agenda`
 - `PUT /agenda/:id`
 - `DELETE /agenda/:id`
+- `GET /v2/petshop/products`
+- `POST /v2/petshop/products`
+- `PUT /v2/petshop/products/:id`
+- `DELETE /v2/petshop/products/:id`
+- `GET /v2/petshop/sales?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `POST /v2/petshop/sales`
+- `GET /v2/petshop/stock-movements?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `POST /v2/petshop/stock-movements`
 - `GET /v2/service-types`
 - `GET /v2/service-types?q=texto`
 - `GET /v2/service-types/:id`
