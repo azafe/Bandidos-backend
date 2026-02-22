@@ -553,6 +553,8 @@ app.post("/auth/reset-password", async (req, res) => {
   }
 });
 
+app.use(requireAuth);
+
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
