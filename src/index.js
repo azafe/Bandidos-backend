@@ -41,30 +41,30 @@ const updateUserSchema = z.object({
   role: z.string().min(1).optional()
 });
 
-const createEmployeeSchema = z.object({
-  name: z.string().min(1),
-  role: z.string().min(1),
-  phone: z.string().min(1).optional().nullable(),
-  email: z.string().email().optional().nullable(),
-  status: statusSchema,
-  notes: z.string().min(1).optional().nullable()
-});
-
-const updateEmployeeSchema = z.object({
-  name: z.string().min(1).optional(),
-  role: z.string().min(1).optional(),
-  phone: z.string().min(1).optional().nullable(),
-  email: z.string().email().optional().nullable(),
-  status: statusSchema.optional(),
-  notes: z.string().min(1).optional().nullable()
-});
-
 const emptyStringToNull = (value) => {
   if (value === "") {
     return null;
   }
   return value;
 };
+
+const createEmployeeSchema = z.object({
+  name: z.string().min(1),
+  role: z.string().min(1),
+  phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
+  status: statusSchema,
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+});
+
+const updateEmployeeSchema = z.object({
+  name: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
+  status: statusSchema.optional(),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+});
 
 const createCustomerSchema = z.object({
   name: z.string().min(1),
@@ -2766,6 +2766,11 @@ app.use((err, _req, res, _next) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`API running on :${port}`);
-});
+
+export { app };
+
+if (process.env.NODE_ENV !== "test") {
+  app.listen(port, () => {
+    console.log(`API running on :${port}`);
+  });
+}
