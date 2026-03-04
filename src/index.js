@@ -88,7 +88,9 @@ const createPetSchema = z.object({
   neutered: z.boolean().optional().default(false),
   behavior: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
-  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  age: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  address: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
 });
 
 const updatePetSchema = z.object({
@@ -99,7 +101,9 @@ const updatePetSchema = z.object({
   neutered: z.boolean().optional(),
   behavior: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   size: z.string().min(1).optional().nullable(),
-  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  age: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  address: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
 });
 
 const createAgendaSchema = z.object({
@@ -1271,12 +1275,12 @@ app.post("/v2/pets", async (req, res) => {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const { name, breed, owner_name, owner_phone, neutered, behavior, size, notes } = parsed.data;
+  const { name, breed, owner_name, owner_phone, neutered, behavior, size, notes, age, address } = parsed.data;
 
   try {
     const result = await pool.query(
-      `INSERT INTO pets (name, breed, owner_name, owner_phone, neutered, behavior, size, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO pets (name, breed, owner_name, owner_phone, neutered, behavior, size, notes, age, address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         name,
@@ -1286,7 +1290,9 @@ app.post("/v2/pets", async (req, res) => {
         neutered,
         behavior ?? null,
         size ?? null,
-        notes ?? null
+        notes ?? null,
+        age ?? null,
+        address ?? null,
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -1304,7 +1310,7 @@ app.put("/v2/pets/:id", async (req, res) => {
 
   const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
-    ["name", "breed", "owner_name", "owner_phone", "neutered", "behavior", "size", "notes"],
+    ["name", "breed", "owner_name", "owner_phone", "neutered", "behavior", "size", "notes", "age", "address"],
     updates
   );
 
