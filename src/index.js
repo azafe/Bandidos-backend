@@ -1419,7 +1419,7 @@ app.get("/agenda/summary", async (req, res) => {
 app.post("/agenda", async (req, res) => {
   const parsed = createAgendaSchema.safeParse(req.body);
   if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
   const {
@@ -1481,7 +1481,7 @@ app.post("/agenda", async (req, res) => {
 app.put("/agenda/:id", async (req, res) => {
   const parsed = updateAgendaSchema.safeParse(req.body);
   if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
   const updates = parsed.data;
