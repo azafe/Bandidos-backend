@@ -1440,14 +1440,6 @@ app.post("/agenda", async (req, res) => {
   } = parsed.data;
 
   try {
-    const duplicate = await pool.query(
-      "SELECT id FROM agenda_turnos WHERE date = $1 AND time = $2 LIMIT 1",
-      [date, time]
-    );
-    if (duplicate.rowCount > 0) {
-      return sendError(res, 409, "Time slot already reserved");
-    }
-
     const result = await pool.query(
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
@@ -1519,15 +1511,6 @@ app.put("/agenda/:id", async (req, res) => {
         return sendError(res, 404, "Agenda item not found");
       }
 
-      const targetDate = updates.date ?? current.rows[0].date;
-      const targetTime = updates.time ?? current.rows[0].time;
-      const duplicate = await pool.query(
-        "SELECT id FROM agenda_turnos WHERE date = $1 AND time = $2 AND id <> $3 LIMIT 1",
-        [targetDate, targetTime, req.params.id]
-      );
-      if (duplicate.rowCount > 0) {
-        return sendError(res, 409, "Time slot already reserved");
-      }
     }
 
     values.push(req.params.id);
