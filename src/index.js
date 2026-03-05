@@ -1411,7 +1411,7 @@ app.get("/agenda/summary", async (req, res) => {
          COALESCE(SUM(st.default_price), 0) AS total_estimated,
          COALESCE(SUM(a.deposit_amount), 0) AS total_deposit
        FROM agenda_turnos a
-       JOIN service_types st ON st.id = a.service_type_id
+       LEFT JOIN service_types st ON st.id = a.service_type_id
        WHERE a.date BETWEEN $1 AND $2`,
       [parsedFrom.data, parsedTo.data]
     );

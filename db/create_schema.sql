@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS agenda_turnos (
   pet_name text NOT NULL,
   breed text,
   owner_name text NOT NULL,
-  service_type_id uuid NOT NULL REFERENCES service_types(id) ON DELETE RESTRICT,
+  service_type_id uuid REFERENCES service_types(id) ON DELETE RESTRICT,
   payment_method_id uuid REFERENCES payment_methods(id) ON DELETE SET NULL,
   price numeric(12,2),
   deposit_amount numeric(12,2) NOT NULL DEFAULT 0 CHECK (deposit_amount >= 0),
