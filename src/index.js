@@ -114,7 +114,7 @@ const createAgendaSchema = z.object({
   pet_name: z.string().min(1),
   breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   owner_name: z.string().min(1),
-  service_type_id: z.string().uuid(),
+  service_type_id: z.string().uuid().optional().nullable(),
   payment_method_id: z.string().uuid().optional().nullable(),
   price: z.coerce.number().min(0).optional().nullable(),
   deposit_amount: z.coerce.number().min(0).optional().default(0),
