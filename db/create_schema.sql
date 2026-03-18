@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS pets (
   behavior text,
   size text,
   notes text,
+  age text,
+  address text,
+  birth_date date,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
