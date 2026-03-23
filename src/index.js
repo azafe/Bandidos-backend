@@ -570,23 +570,36 @@ app.post("/auth/reset-password", async (req, res) => {
 app.use(requireAuth);
 
 // Extrae tenant_id del JWT y lo pone en req.tenantId.
+// También bloquea tenants inactivos y super_admin en rutas de datos.
 app.use((req, res, next) => {
   req.tenantId = req.user?.tenant_id ?? null;
 
   // Si es super_admin y NO está en una ruta de superadmin (/v2/super/...),
-  // ni en /me o /health, bloqueamos el acceso. Un super_admin no debería 
-  // interactuar directamente con datos de tenants en rutas normales.
+  // ni en /me o /health, bloqueamos el acceso.
   if (req.user?.role === "super_admin") {
     const path = req.path;
     const isSuperRoute = path.startsWith("/v2/super/");
-    const isPublic = path === "/me" || path === "/health" || path === "/auth/logout"; 
-    
+    const isPublic = path === "/me" || path === "/health" || path === "/auth/logout";
     if (!isSuperRoute && !isPublic) {
       return sendError(res, 403, "Super Admin cannot access tenant data routes");
     }
+    return next();
   }
 
-  next();
+  // Verificar que el tenant del usuario esté activo.
+  // Consultamos la DB solo si el usuario tiene tenant_id.
+  if (req.tenantId) {
+    pool.query("SELECT status FROM tenants WHERE id = $1", [req.tenantId])
+      .then(({ rows }) => {
+        if (!rows.length || rows[0].status !== "active") {
+          return sendError(res, 403, "Tenant is inactive");
+        }
+        next();
+      })
+      .catch(() => sendError(res, 500, "Unexpected error"));
+  } else {
+    next();
+  }
 });
 
 app.get("/me", requireAuth, async (req, res) => {
@@ -1077,8 +1090,12 @@ app.put("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => 
 });
 
 app.delete("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   try {
-    const result = await pool.query("DELETE FROM users WHERE id = $1", [req.params.id]);
+    const result = await pool.query(
+      "DELETE FROM users WHERE id = $1 AND tenant_id = $2",
+      [req.params.id, req.tenantId]
+    );
     if (result.rowCount === 0) {
       return sendError(res, 404, "User not found");
     }
