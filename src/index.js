@@ -570,9 +570,22 @@ app.post("/auth/reset-password", async (req, res) => {
 app.use(requireAuth);
 
 // Extrae tenant_id del JWT y lo pone en req.tenantId.
-// Para SUPER_ADMIN (sin tenant) queda null → sin filtro → acceso global de lectura.
-app.use((req, _res, next) => {
+app.use((req, res, next) => {
   req.tenantId = req.user?.tenant_id ?? null;
+
+  // Si es super_admin y NO está en una ruta de superadmin (/v2/super/...),
+  // ni en /me o /health, bloqueamos el acceso. Un super_admin no debería 
+  // interactuar directamente con datos de tenants en rutas normales.
+  if (req.user?.role === "super_admin") {
+    const path = req.path;
+    const isSuperRoute = path.startsWith("/v2/super/");
+    const isPublic = path === "/me" || path === "/health" || path === "/auth/logout"; 
+    
+    if (!isSuperRoute && !isPublic) {
+      return sendError(res, 403, "Super Admin cannot access tenant data routes");
+    }
+  }
+
   next();
 });
 
