@@ -353,7 +353,7 @@ const resetPasswordTokenLimiter = createRateLimiter({
 
 const signToken = (user) => {
   return jwt.sign(
-    { sub: user.id, role: user.role, email: user.email },
+    { sub: user.id, role: user.role, email: user.email, tenant_id: user.tenant_id ?? null },
     jwtSecret,
     { expiresIn: "7d" }
   );
@@ -381,13 +381,20 @@ const requireAuth = (req, res, next) => {
   }
 };
 
-const requireRole = (role) => {
+const requireRole = (...roles) => {
   return (req, res, next) => {
-    if (!req.user || req.user.role !== role) {
-      return sendError(res, 403, "Forbidden");
-    }
+    if (!req.user) return sendError(res, 401, "Unauthorized");
+    if (req.user.role === "super_admin") return next();
+    if (!roles.includes(req.user.role)) return sendError(res, 403, "Forbidden");
     return next();
   };
+};
+
+const requireSuperAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== "super_admin") {
+    return sendError(res, 403, "Forbidden");
+  }
+  return next();
 };
 
 const hashPassword = async (password) => {
@@ -498,6 +505,7 @@ app.post("/auth/login", async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        tenant_id: user.tenant_id ?? null,
         created_at: user.created_at
       }
     });
@@ -564,7 +572,7 @@ app.use(requireAuth);
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, email, role, created_at FROM users WHERE id = $1",
+      "SELECT id, email, role, tenant_id, created_at FROM users WHERE id = $1",
       [req.user.sub]
     );
 
@@ -2751,6 +2759,118 @@ app.delete("/v2/fixed-expenses/:id", async (req, res) => {
     sendError(res, 500, "Unexpected error");
   }
 });
+
+// ─── Super Admin: gestión de tenants ────────────────────────────────────────
+
+app.get("/v2/super/tenants", requireAuth, requireSuperAdmin, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT t.*, COUNT(u.id)::int AS user_count
+       FROM tenants t
+       LEFT JOIN users u ON u.tenant_id = t.id
+       GROUP BY t.id
+       ORDER BY t.created_at`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/v2/super/tenants/:id", requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT t.*, COUNT(u.id)::int AS user_count
+       FROM tenants t
+       LEFT JOIN users u ON u.tenant_id = t.id
+       WHERE t.id = $1
+       GROUP BY t.id`,
+      [req.params.id]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Tenant not found");
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/super/tenants", requireAuth, requireSuperAdmin, async (req, res) => {
+  const schema = z.object({
+    name:            z.string().min(1),
+    logo_url:        z.string().url().optional().nullable(),
+    primary_color:   z.string().optional().nullable(),
+    secondary_color: z.string().optional().nullable(),
+    plan:            z.string().optional().default("basic")
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const { name, logo_url, primary_color, secondary_color, plan } = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO tenants (name, logo_url, primary_color, secondary_color, plan)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [name, logo_url ?? null, primary_color ?? null, secondary_color ?? null, plan]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.patch("/v2/super/tenants/:id", requireAuth, requireSuperAdmin, async (req, res) => {
+  const allowed = ["name", "logo_url", "primary_color", "secondary_color", "plan", "status"];
+  const { fields, values, idx } = buildUpdate(allowed, req.body);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
+  values.push(req.params.id);
+  try {
+    const result = await pool.query(
+      `UPDATE tenants SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`,
+      values
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Tenant not found");
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/super/tenants/:id/admin", requireAuth, requireSuperAdmin, async (req, res) => {
+  const schema = z.object({
+    email:    z.string().email(),
+    password: z.string().min(6)
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  // Verificar que el tenant existe
+  const tenantResult = await pool.query("SELECT id FROM tenants WHERE id = $1", [req.params.id]);
+  if (tenantResult.rowCount === 0) return sendError(res, 404, "Tenant not found");
+
+  const { email, password } = parsed.data;
+  const passwordHash = await hashPassword(password);
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, role, tenant_id)
+       VALUES ($1, $2, 'admin', $3)
+       RETURNING id, email, role, tenant_id, created_at`,
+      [email, passwordHash, req.params.id]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === "23505") return sendError(res, 409, "Email already exists");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 
 app.use((err, _req, res, _next) => {
   console.error(err);
