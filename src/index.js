@@ -569,6 +569,13 @@ app.post("/auth/reset-password", async (req, res) => {
 
 app.use(requireAuth);
 
+// Extrae tenant_id del JWT y lo pone en req.tenantId.
+// Para SUPER_ADMIN (sin tenant) queda null → sin filtro → acceso global de lectura.
+app.use((req, _res, next) => {
+  req.tenantId = req.user?.tenant_id ?? null;
+  next();
+});
+
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -596,6 +603,8 @@ app.get("/reports/summary", async (req, res) => {
   const filters = [];
   const params = [];
 
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+
   if (from) {
     params.push(from);
     filters.push(`date >= $${params.length}`);
@@ -607,6 +616,12 @@ app.get("/reports/summary", async (req, res) => {
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  const fixedFilters = [];
+  const fixedParams = [];
+  if (req.tenantId) { fixedParams.push(req.tenantId); fixedFilters.push(`tenant_id = $${fixedParams.length}`); }
+  fixedFilters.push("status = 'active'");
+  const fixedWhere = `WHERE ${fixedFilters.join(" AND ")}`;
 
   try {
     const servicesResult = await pool.query(
@@ -621,7 +636,8 @@ app.get("/reports/summary", async (req, res) => {
     );
     const fixedResult = includeFixed
       ? await pool.query(
-          "SELECT COALESCE(SUM(amount), 0) AS total FROM fixed_expenses WHERE status = 'active'"
+          `SELECT COALESCE(SUM(amount), 0) AS total FROM fixed_expenses ${fixedWhere}`,
+          fixedParams
         )
       : { rows: [{ total: 0 }] };
 
@@ -646,6 +662,8 @@ app.get("/reports/daily", async (req, res) => {
   const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
   const filters = [];
   const params = [];
+
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
 
   if (from) {
     params.push(from);
@@ -694,6 +712,8 @@ app.get("/reports/by-groomer", async (req, res) => {
   const filters = [];
   const params = [];
 
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`s.tenant_id = $${params.length}`); }
+
   if (from) {
     params.push(from);
     filters.push(`s.date >= $${params.length}`);
@@ -732,6 +752,8 @@ app.get("/reports/by-customer", async (req, res) => {
   const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
   const filters = [];
   const params = [];
+
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`s.tenant_id = $${params.length}`); }
 
   if (from) {
     params.push(from);
@@ -781,6 +803,8 @@ app.get("/services", async (req, res) => {
   const filters = [];
   const params = [];
 
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+
   if (from) {
     params.push(from);
     filters.push(`date >= $${params.length}`);
@@ -824,6 +848,7 @@ app.get("/services", async (req, res) => {
 });
 
 app.post("/services", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -843,8 +868,8 @@ app.post("/services", async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO services
-        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         date,
@@ -854,7 +879,8 @@ app.post("/services", async (req, res) => {
         price,
         payment_method_id,
         groomer_id ?? null,
-        notes ?? null
+        notes ?? null,
+        req.tenantId
       ]
     );
 
@@ -866,6 +892,7 @@ app.post("/services", async (req, res) => {
 });
 
 app.put("/services/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -891,11 +918,12 @@ app.put("/services/:id", async (req, res) => {
   }
 
   values.push(req.params.id);
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
 
   try {
     const result = await pool.query(
       `UPDATE services SET ${fields.join(", ")}
-       WHERE id = $${idx}
+       WHERE id = $${idx}${tenantClause}
        RETURNING *`,
       values
     );
@@ -912,10 +940,14 @@ app.put("/services/:id", async (req, res) => {
 });
 
 app.delete("/services/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM services WHERE id = $1", [
-      req.params.id
-    ]);
+    const result = await pool.query(
+      `DELETE FROM services WHERE id = $1${tenantClause}`,
+      params
+    );
 
     if (result.rowCount === 0) {
       return sendError(res, 404, "Service not found");
@@ -928,10 +960,13 @@ app.delete("/services/:id", async (req, res) => {
   }
 });
 
-app.get("/v2/users", requireAuth, requireRole("admin"), async (_req, res) => {
+app.get("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
+  const params = [];
+  const tenantClause = req.tenantId ? `WHERE tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      "SELECT id, email, role, created_at FROM users ORDER BY created_at DESC"
+      `SELECT id, email, role, tenant_id, created_at FROM users ${tenantClause} ORDER BY created_at DESC`,
+      params
     );
     res.json(result.rows);
   } catch (err) {
@@ -941,10 +976,12 @@ app.get("/v2/users", requireAuth, requireRole("admin"), async (_req, res) => {
 });
 
 app.get("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      "SELECT id, email, role, created_at FROM users WHERE id = $1",
-      [req.params.id]
+      `SELECT id, email, role, tenant_id, created_at FROM users WHERE id = $1${tenantClause}`,
+      params
     );
     if (result.rowCount === 0) {
       return sendError(res, 404, "User not found");
@@ -957,6 +994,7 @@ app.get("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => 
 });
 
 app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createUserSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -967,10 +1005,10 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO users (email, password_hash, role)
-       VALUES ($1, $2, $3)
-       RETURNING id, email, role, created_at`,
-      [email, passwordHash, role]
+      `INSERT INTO users (email, password_hash, role, tenant_id)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, email, role, tenant_id, created_at`,
+      [email, passwordHash, role, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1033,10 +1071,12 @@ app.delete("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) 
   }
 });
 
-app.get("/v2/employees", async (_req, res) => {
+app.get("/v2/employees", async (req, res) => {
+  const params = [];
+  const tenantClause = req.tenantId ? `WHERE tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      "SELECT * FROM employees ORDER BY created_at DESC"
+      `SELECT * FROM employees ${tenantClause} ORDER BY created_at DESC`, params
     );
     res.json(result.rows);
   } catch (err) {
@@ -1046,13 +1086,13 @@ app.get("/v2/employees", async (_req, res) => {
 });
 
 app.get("/v2/employees/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query("SELECT * FROM employees WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Employee not found");
-    }
+    const result = await pool.query(
+      `SELECT * FROM employees WHERE id = $1${tenantClause}`, params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Employee not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1061,19 +1101,17 @@ app.get("/v2/employees/:id", async (req, res) => {
 });
 
 app.post("/v2/employees", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createEmployeeSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const { name, role, phone, email, status, notes } = parsed.data;
-
   try {
     const result = await pool.query(
-      `INSERT INTO employees (name, role, phone, email, status, notes)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [name, role, phone ?? null, email ?? null, status, notes ?? null]
+      [name, role, phone ?? null, email ?? null, status, notes ?? null, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1083,35 +1121,22 @@ app.post("/v2/employees", async (req, res) => {
 });
 
 app.put("/v2/employees/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateEmployeeSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(
-    ["name", "role", "phone", "email", "status", "notes"],
-    updates
-  );
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
+  const { fields, values, idx } = buildUpdate(["name", "role", "phone", "email", "status", "notes"], updates);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
 
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE employees SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
+      `UPDATE employees SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`,
       values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Employee not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Employee not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1120,13 +1145,12 @@ app.put("/v2/employees/:id", async (req, res) => {
 });
 
 app.delete("/v2/employees/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM employees WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Employee not found");
-    }
+    const result = await pool.query(`DELETE FROM employees WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Employee not found");
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1136,16 +1160,20 @@ app.delete("/v2/employees/:id", async (req, res) => {
 
 app.get("/v2/customers", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const hasQuery = query.length > 0;
-  const sql = hasQuery
-    ? `SELECT * FROM customers
-       WHERE name ILIKE $1 OR email ILIKE $1 OR phone ILIKE $1
-       ORDER BY created_at DESC`
-    : "SELECT * FROM customers ORDER BY created_at DESC";
-  const params = hasQuery ? [`%${query}%`] : [];
+  const filters = [];
+  const params = [];
 
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+  if (query) {
+    params.push(`%${query}%`);
+    filters.push(`(name ILIKE $${params.length} OR email ILIKE $${params.length} OR phone ILIKE $${params.length})`);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   try {
-    const result = await pool.query(sql, params);
+    const result = await pool.query(
+      `SELECT * FROM customers ${whereClause} ORDER BY created_at DESC`, params
+    );
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -1154,13 +1182,13 @@ app.get("/v2/customers", async (req, res) => {
 });
 
 app.get("/v2/customers/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query("SELECT * FROM customers WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Customer not found");
-    }
+    const result = await pool.query(
+      `SELECT * FROM customers WHERE id = $1${tenantClause}`, params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Customer not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1169,19 +1197,17 @@ app.get("/v2/customers/:id", async (req, res) => {
 });
 
 app.post("/v2/customers", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createCustomerSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const { name, phone, email, notes } = parsed.data;
-
   try {
     const result = await pool.query(
-      `INSERT INTO customers (name, phone, email, notes)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO customers (name, phone, email, notes, tenant_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [name, phone ?? null, email ?? null, notes ?? null]
+      [name, phone ?? null, email ?? null, notes ?? null, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1191,35 +1217,22 @@ app.post("/v2/customers", async (req, res) => {
 });
 
 app.put("/v2/customers/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateCustomerSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(
-    ["name", "phone", "email", "notes"],
-    updates
-  );
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
+  const { fields, values, idx } = buildUpdate(["name", "phone", "email", "notes"], updates);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
 
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE customers SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
+      `UPDATE customers SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`,
       values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Customer not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Customer not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1228,13 +1241,12 @@ app.put("/v2/customers/:id", async (req, res) => {
 });
 
 app.delete("/v2/customers/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM customers WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Customer not found");
-    }
+    const result = await pool.query(`DELETE FROM customers WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Customer not found");
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1247,6 +1259,7 @@ app.get("/v2/pets", async (req, res) => {
   const filters = [];
   const params = [];
 
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
   if (query) {
     params.push(`%${query}%`);
     filters.push(`(name ILIKE $${params.length} OR breed ILIKE $${params.length})`);
@@ -1265,13 +1278,11 @@ app.get("/v2/pets", async (req, res) => {
 });
 
 app.get("/v2/pets/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query("SELECT * FROM pets WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Pet not found");
-    }
+    const result = await pool.query(`SELECT * FROM pets WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1280,31 +1291,18 @@ app.get("/v2/pets/:id", async (req, res) => {
 });
 
 app.post("/v2/pets", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPetSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const { name, breed, owner_name, owner_phone, neutered, behavior, size, notes, age, address, birth_date } = parsed.data;
 
   try {
     const result = await pool.query(
-      `INSERT INTO pets (name, breed, owner_name, owner_phone, neutered, behavior, size, notes, age, address, birth_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO pets (name, breed, owner_name, owner_phone, neutered, behavior, size, notes, age, address, birth_date, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
-      [
-        name,
-        breed ?? null,
-        owner_name,
-        owner_phone ?? null,
-        neutered,
-        behavior ?? null,
-        size ?? null,
-        notes ?? null,
-        age ?? null,
-        address ?? null,
-        birth_date ?? null,
-      ]
+      [name, breed ?? null, owner_name, owner_phone ?? null, neutered, behavior ?? null, size ?? null, notes ?? null, age ?? null, address ?? null, birth_date ?? null, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1314,10 +1312,9 @@ app.post("/v2/pets", async (req, res) => {
 });
 
 app.put("/v2/pets/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updatePetSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
@@ -1325,24 +1322,16 @@ app.put("/v2/pets/:id", async (req, res) => {
     updates
   );
 
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
 
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE pets SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
+      `UPDATE pets SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`,
       values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Pet not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1351,13 +1340,12 @@ app.put("/v2/pets/:id", async (req, res) => {
 });
 
 app.delete("/v2/pets/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM pets WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Pet not found");
-    }
+    const result = await pool.query(`DELETE FROM pets WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1377,10 +1365,12 @@ app.get("/agenda", async (req, res) => {
       return sendError(res, 400, "Invalid date range");
     }
 
+    const rangeParams = [parsedFrom.data, parsedTo.data];
+    const tenantRange = req.tenantId ? ` AND tenant_id = $${rangeParams.push(req.tenantId)}` : "";
     try {
       const result = await pool.query(
-        "SELECT * FROM agenda_turnos WHERE date BETWEEN $1 AND $2 ORDER BY date ASC, time ASC",
-        [parsedFrom.data, parsedTo.data]
+        `SELECT * FROM agenda_turnos WHERE date BETWEEN $1 AND $2${tenantRange} ORDER BY date ASC, time ASC`,
+        rangeParams
       );
       return res.json(result.rows);
     } catch (err) {
@@ -1390,14 +1380,14 @@ app.get("/agenda", async (req, res) => {
   }
 
   const parsedDate = dateSchema.safeParse(date);
-  if (!parsedDate.success) {
-    return sendError(res, 400, "Invalid date");
-  }
+  if (!parsedDate.success) return sendError(res, 400, "Invalid date");
 
+  const dayParams = [parsedDate.data];
+  const tenantDay = req.tenantId ? ` AND tenant_id = $${dayParams.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      "SELECT * FROM agenda_turnos WHERE date = $1 ORDER BY time ASC",
-      [parsedDate.data]
+      `SELECT * FROM agenda_turnos WHERE date = $1${tenantDay} ORDER BY time ASC`,
+      dayParams
     );
     res.json(result.rows);
   } catch (err) {
@@ -1412,10 +1402,10 @@ app.get("/agenda/summary", async (req, res) => {
   const parsedFrom = dateSchema.safeParse(from);
   const parsedTo = dateSchema.safeParse(to);
 
-  if (!parsedFrom.success || !parsedTo.success) {
-    return sendError(res, 400, "Invalid date range");
-  }
+  if (!parsedFrom.success || !parsedTo.success) return sendError(res, 400, "Invalid date range");
 
+  const params = [parsedFrom.data, parsedTo.data];
+  const tenantClause = req.tenantId ? ` AND a.tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
       `SELECT
@@ -1423,8 +1413,8 @@ app.get("/agenda/summary", async (req, res) => {
          COALESCE(SUM(a.deposit_amount), 0) AS total_deposit
        FROM agenda_turnos a
        LEFT JOIN service_types st ON st.id = a.service_type_id
-       WHERE a.date BETWEEN $1 AND $2`,
-      [parsedFrom.data, parsedTo.data]
+       WHERE a.date BETWEEN $1 AND $2${tenantClause}`,
+      params
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -1434,6 +1424,7 @@ app.get("/agenda/summary", async (req, res) => {
 });
 
 app.post("/agenda", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createAgendaSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
@@ -1460,24 +1451,13 @@ app.post("/agenda", async (req, res) => {
     const result = await pool.query(
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
-        payment_method_id, price, deposit_amount, notes, groomer_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING *`,
       [
-        date,
-        time,
-        duration,
-        pet_id ?? null,
-        pet_name,
-        breed ?? null,
-        owner_name,
-        service_type_id,
-        payment_method_id ?? null,
-        price ?? null,
-        deposit_amount ?? 0,
-        notes ?? null,
-        groomer_id ?? null,
-        status
+        date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
+        service_type_id, payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
+        notes ?? null, groomer_id ?? null, status, req.tenantId
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -1488,6 +1468,7 @@ app.post("/agenda", async (req, res) => {
 });
 
 app.put("/agenda/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateAgendaSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
@@ -1531,18 +1512,16 @@ app.put("/agenda/:id", async (req, res) => {
     }
 
     values.push(req.params.id);
+    const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
 
     const result = await pool.query(
       `UPDATE agenda_turnos SET ${fields.join(", ")}
-       WHERE id = $${idx}
+       WHERE id = $${idx}${tenantClause}
        RETURNING *`,
       values
     );
 
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Agenda item not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1551,13 +1530,14 @@ app.put("/agenda/:id", async (req, res) => {
 });
 
 app.delete("/agenda/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM agenda_turnos WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Agenda item not found");
-    }
+    const result = await pool.query(
+      `DELETE FROM agenda_turnos WHERE id = $1${tenantClause}`, params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1567,311 +1547,187 @@ app.delete("/agenda/:id", async (req, res) => {
 
 app.get("/v2/service-types", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const hasQuery = query.length > 0;
-  const sql = hasQuery
-    ? `SELECT * FROM service_types
-       WHERE name ILIKE $1
-       ORDER BY created_at DESC`
-    : "SELECT * FROM service_types ORDER BY created_at DESC";
-  const params = hasQuery ? [`%${query}%`] : [];
-
+  const filters = [];
+  const params = [];
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+  if (query) { params.push(`%${query}%`); filters.push(`name ILIKE $${params.length}`); }
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   try {
-    const result = await pool.query(sql, params);
+    const result = await pool.query(`SELECT * FROM service_types ${whereClause} ORDER BY created_at DESC`, params);
     res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/service-types/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query("SELECT * FROM service_types WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Service type not found");
-    }
+    const result = await pool.query(`SELECT * FROM service_types WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Service type not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/service-types", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createServiceTypeSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { name, default_price } = parsed.data;
-
   try {
     const result = await pool.query(
-      `INSERT INTO service_types (name, default_price)
-       VALUES ($1, $2)
-       RETURNING *`,
-      [name, default_price ?? null]
+      `INSERT INTO service_types (name, default_price, tenant_id) VALUES ($1, $2, $3) RETURNING *`,
+      [name, default_price ?? null, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/service-types/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceTypeSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(["name", "default_price"], updates);
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { fields, values, idx } = buildUpdate(["name", "default_price"], parsed.data);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE service_types SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE service_types SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Service type not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Service type not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/service-types/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM service_types WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Service type not found");
-    }
+    const result = await pool.query(`DELETE FROM service_types WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Service type not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/payment-methods", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const hasQuery = query.length > 0;
-  const sql = hasQuery
-    ? `SELECT * FROM payment_methods
-       WHERE name ILIKE $1
-       ORDER BY created_at DESC`
-    : "SELECT * FROM payment_methods ORDER BY created_at DESC";
-  const params = hasQuery ? [`%${query}%`] : [];
-
+  const filters = [];
+  const params = [];
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+  if (query) { params.push(`%${query}%`); filters.push(`name ILIKE $${params.length}`); }
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   try {
-    const result = await pool.query(sql, params);
+    const result = await pool.query(`SELECT * FROM payment_methods ${whereClause} ORDER BY created_at DESC`, params);
     res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/payment-methods/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query(
-      "SELECT * FROM payment_methods WHERE id = $1",
-      [req.params.id]
-    );
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Payment method not found");
-    }
+    const result = await pool.query(`SELECT * FROM payment_methods WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Payment method not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/payment-methods", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPaymentMethodSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { name } = parsed.data;
-
   try {
     const result = await pool.query(
-      `INSERT INTO payment_methods (name)
-       VALUES ($1)
-       RETURNING *`,
-      [name]
+      `INSERT INTO payment_methods (name, tenant_id) VALUES ($1, $2) RETURNING *`,
+      [name, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/payment-methods/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updatePaymentMethodSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(["name"], updates);
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { fields, values, idx } = buildUpdate(["name"], parsed.data);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE payment_methods SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE payment_methods SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Payment method not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Payment method not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/payment-methods/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM payment_methods WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Payment method not found");
-    }
+    const result = await pool.query(`DELETE FROM payment_methods WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Payment method not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.get("/v2/petshop/products", async (_req, res) => {
+app.get("/v2/petshop/products", async (req, res) => {
+  const params = [];
+  const tenantClause = req.tenantId ? `WHERE tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query(
-      "SELECT * FROM petshop_products ORDER BY created_at DESC"
-    );
+    const result = await pool.query(`SELECT * FROM petshop_products ${tenantClause} ORDER BY created_at DESC`, params);
     res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/petshop/products", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPetshopProductSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const { name, sku, category, supplier_id, cost, price, stock, stock_min } =
-    parsed.data;
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { name, sku, category, supplier_id, cost, price, stock, stock_min } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO petshop_products
-       (name, sku, category, supplier_id, cost, price, stock, stock_min)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        name,
-        sku ?? null,
-        category ?? null,
-        supplier_id ?? null,
-        cost ?? 0,
-        price,
-        stock ?? 0,
-        stock_min ?? 0
-      ]
+      `INSERT INTO petshop_products (name, sku, category, supplier_id, cost, price, stock, stock_min, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [name, sku ?? null, category ?? null, supplier_id ?? null, cost ?? 0, price, stock ?? 0, stock_min ?? 0, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/petshop/products/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updatePetshopProductSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const updates = parsed.data;
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { fields, values, idx } = buildUpdate(
-    ["name", "sku", "category", "supplier_id", "cost", "price", "stock", "stock_min"],
-    updates
+    ["name", "sku", "category", "supplier_id", "cost", "price", "stock", "stock_min"], parsed.data
   );
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
-
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   const updateFields = [...fields, "updated_at = now()"];
-
   try {
     const result = await pool.query(
-      `UPDATE petshop_products SET ${updateFields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE petshop_products SET ${updateFields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Product not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Product not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/petshop/products/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM petshop_products WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Product not found");
-    }
+    const result = await pool.query(`DELETE FROM petshop_products WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Product not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/petshop/sales", async (req, res) => {
@@ -1902,10 +1758,10 @@ app.get("/v2/petshop/sales", async (req, res) => {
          ) AS items
        FROM petshop_sales s
        LEFT JOIN petshop_sale_items si ON si.sale_id = s.id
-       WHERE s.date BETWEEN $1 AND $2
+       WHERE s.date BETWEEN $1 AND $2${req.tenantId ? ` AND s.tenant_id = $3` : ""}
        GROUP BY s.id
        ORDER BY s.date DESC, s.created_at DESC`,
-      [parsedFrom.data, parsedTo.data]
+      req.tenantId ? [parsedFrom.data, parsedTo.data, req.tenantId] : [parsedFrom.data, parsedTo.data]
     );
     res.json(result.rows);
   } catch (err) {
@@ -1915,10 +1771,9 @@ app.get("/v2/petshop/sales", async (req, res) => {
 });
 
 app.post("/v2/petshop/sales", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPetshopSaleSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const { date, customer_id, payment_method_id, notes, total, items } = parsed.data;
   const productIds = [...new Set(items.map((item) => item.product_id))];
@@ -1939,10 +1794,10 @@ app.post("/v2/petshop/sales", async (req, res) => {
 
     const saleResult = await client.query(
       `INSERT INTO petshop_sales
-       (date, customer_id, payment_method_id, notes, total)
-       VALUES ($1, $2, $3, $4, $5)
+       (date, customer_id, payment_method_id, notes, total, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [date, customer_id ?? null, payment_method_id, notes ?? null, total]
+      [date, customer_id ?? null, payment_method_id, notes ?? null, total, req.tenantId]
     );
     const sale = saleResult.rows[0];
     const saleItems = [];
@@ -1950,10 +1805,10 @@ app.post("/v2/petshop/sales", async (req, res) => {
     for (const item of items) {
       const itemResult = await client.query(
         `INSERT INTO petshop_sale_items
-         (sale_id, product_id, quantity, unit_price)
-         VALUES ($1, $2, $3, $4)
+         (sale_id, product_id, quantity, unit_price, tenant_id)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING *`,
-        [sale.id, item.product_id, item.quantity, item.unit_price]
+        [sale.id, item.product_id, item.quantity, item.unit_price, req.tenantId]
       );
       saleItems.push(itemResult.rows[0]);
 
@@ -1991,9 +1846,9 @@ app.get("/v2/petshop/stock-movements", async (req, res) => {
     const result = await pool.query(
       `SELECT *
        FROM petshop_stock_movements
-       WHERE date BETWEEN $1 AND $2
+       WHERE date BETWEEN $1 AND $2${req.tenantId ? ` AND tenant_id = $3` : ""}
        ORDER BY date DESC, created_at DESC`,
-      [parsedFrom.data, parsedTo.data]
+      req.tenantId ? [parsedFrom.data, parsedTo.data, req.tenantId] : [parsedFrom.data, parsedTo.data]
     );
     res.json(result.rows);
   } catch (err) {
@@ -2003,6 +1858,7 @@ app.get("/v2/petshop/stock-movements", async (req, res) => {
 });
 
 app.post("/v2/petshop/stock-movements", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPetshopStockMovementSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -2044,10 +1900,10 @@ app.post("/v2/petshop/stock-movements", async (req, res) => {
 
     const movementResult = await client.query(
       `INSERT INTO petshop_stock_movements
-       (date, product_id, type, quantity, note)
-       VALUES ($1, $2, $3, $4, $5)
+       (date, product_id, type, quantity, note, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [date, product_id, type, quantity, note ?? null]
+      [date, product_id, type, quantity, note ?? null, req.tenantId]
     );
 
     await client.query("COMMIT");
@@ -2078,6 +1934,8 @@ app.get("/v2/services", async (req, res) => {
     typeof req.query.groomer_id === "string" ? req.query.groomer_id.trim() : "";
   const filters = [];
   const params = [];
+
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
 
   if (from) {
     params.push(from);
@@ -2122,123 +1980,62 @@ app.get("/v2/services", async (req, res) => {
 });
 
 app.get("/v2/services/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query("SELECT * FROM services WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Service not found");
-    }
+    const result = await pool.query(`SELECT * FROM services WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Service not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/services", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createServiceRecordSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const {
-    date,
-    pet_id,
-    customer_id,
-    service_type_id,
-    price,
-    payment_method_id,
-    groomer_id,
-    notes
-  } = parsed.data;
-
+  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO services
-        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        date,
-        pet_id,
-        customer_id,
-        service_type_id,
-        price,
-        payment_method_id,
-        groomer_id ?? null,
-        notes ?? null
-      ]
+      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId]
     );
-
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/services/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceRecordSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
-    [
-      "date",
-      "pet_id",
-      "customer_id",
-      "service_type_id",
-      "price",
-      "payment_method_id",
-      "groomer_id",
-      "notes"
-    ],
-    updates
+    ["date", "pet_id", "customer_id", "service_type_id", "price", "payment_method_id", "groomer_id", "notes"],
+    parsed.data
   );
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
 
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE services SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE services SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Service not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Service not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/services/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM services WHERE id = $1", [
-      req.params.id
-    ]);
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Service not found");
-    }
-
+    const result = await pool.query(`DELETE FROM services WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Service not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/suppliers", async (req, res) => {
@@ -2246,6 +2043,8 @@ app.get("/v2/suppliers", async (req, res) => {
   const category = typeof req.query.category === "string" ? req.query.category.trim() : "";
   const filters = [];
   const params = [];
+
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`suppliers.tenant_id = $${params.length}`); }
 
   if (query) {
     params.push(`%${query}%`);
@@ -2276,205 +2075,126 @@ app.get("/v2/suppliers", async (req, res) => {
 });
 
 app.get("/v2/suppliers/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND suppliers.tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      `SELECT suppliers.*,
-        payment_methods.name AS payment_method_name
-        FROM suppliers
-        LEFT JOIN payment_methods
-          ON payment_methods.id = suppliers.payment_method_id
-        WHERE suppliers.id = $1`,
-      [req.params.id]
+      `SELECT suppliers.*, payment_methods.name AS payment_method_name
+       FROM suppliers LEFT JOIN payment_methods ON payment_methods.id = suppliers.payment_method_id
+       WHERE suppliers.id = $1${tenantClause}`,
+      params
     );
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Supplier not found");
-    }
+    if (result.rowCount === 0) return sendError(res, 404, "Supplier not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/suppliers", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createSupplierSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { name, category, phone, payment_method_id, notes } = parsed.data;
-
   try {
     const result = await pool.query(
-      `INSERT INTO suppliers (name, category, phone, payment_method_id, notes)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
-      [name, category ?? null, phone ?? null, payment_method_id ?? null, notes ?? null]
+      `INSERT INTO suppliers (name, category, phone, payment_method_id, notes, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [name, category ?? null, phone ?? null, payment_method_id ?? null, notes ?? null, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/suppliers/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateSupplierSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(
-    ["name", "category", "phone", "payment_method_id", "notes"],
-    updates
-  );
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { fields, values, idx } = buildUpdate(["name", "category", "phone", "payment_method_id", "notes"], parsed.data);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE suppliers SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE suppliers SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Supplier not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Supplier not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/suppliers/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM suppliers WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Supplier not found");
-    }
+    const result = await pool.query(`DELETE FROM suppliers WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Supplier not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/expense-categories", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const hasQuery = query.length > 0;
-  const sql = hasQuery
-    ? `SELECT * FROM expense_categories
-       WHERE name ILIKE $1
-       ORDER BY created_at DESC`
-    : "SELECT * FROM expense_categories ORDER BY created_at DESC";
-  const params = hasQuery ? [`%${query}%`] : [];
-
+  const filters = [];
+  const params = [];
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+  if (query) { params.push(`%${query}%`); filters.push(`name ILIKE $${params.length}`); }
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   try {
-    const result = await pool.query(sql, params);
+    const result = await pool.query(`SELECT * FROM expense_categories ${whereClause} ORDER BY created_at DESC`, params);
     res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/expense-categories/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query(
-      "SELECT * FROM expense_categories WHERE id = $1",
-      [req.params.id]
-    );
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Expense category not found");
-    }
+    const result = await pool.query(`SELECT * FROM expense_categories WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Expense category not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/expense-categories", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createExpenseCategorySchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { name } = parsed.data;
-
   try {
     const result = await pool.query(
-      `INSERT INTO expense_categories (name)
-       VALUES ($1)
-       RETURNING *`,
-      [name]
+      `INSERT INTO expense_categories (name, tenant_id) VALUES ($1, $2) RETURNING *`,
+      [name, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/expense-categories/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateExpenseCategorySchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(["name"], updates);
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { fields, values, idx } = buildUpdate(["name"], parsed.data);
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE expense_categories SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE expense_categories SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Expense category not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Expense category not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/expense-categories/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query(
-      "DELETE FROM expense_categories WHERE id = $1",
-      [req.params.id]
-    );
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Expense category not found");
-    }
+    const result = await pool.query(`DELETE FROM expense_categories WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Expense category not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/daily-expenses", async (req, res) => {
@@ -2484,6 +2204,8 @@ app.get("/v2/daily-expenses", async (req, res) => {
     typeof req.query.category_id === "string" ? req.query.category_id.trim() : "";
   const filters = [];
   const params = [];
+
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
 
   if (from) {
     params.push(from);
@@ -2513,108 +2235,58 @@ app.get("/v2/daily-expenses", async (req, res) => {
 });
 
 app.get("/v2/daily-expenses/:id", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
-    const result = await pool.query("SELECT * FROM daily_expenses WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Daily expense not found");
-    }
+    const result = await pool.query(`SELECT * FROM daily_expenses WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Daily expense not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.post("/v2/daily-expenses", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createDailyExpenseSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const { date, category_id, description, amount, payment_method_id, supplier_id } =
-    parsed.data;
-
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { date, category_id, description, amount, payment_method_id, supplier_id } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO daily_expenses
-        (date, category_id, description, amount, payment_method_id, supplier_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [
-        date,
-        category_id,
-        description,
-        amount,
-        payment_method_id,
-        supplier_id ?? null
-      ]
+      `INSERT INTO daily_expenses (date, category_id, description, amount, payment_method_id, supplier_id, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [date, category_id, description, amount, payment_method_id, supplier_id ?? null, req.tenantId]
     );
     res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.put("/v2/daily-expenses/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateDailyExpenseSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  const updates = parsed.data;
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { fields, values, idx } = buildUpdate(
-    [
-      "date",
-      "category_id",
-      "description",
-      "amount",
-      "payment_method_id",
-      "supplier_id"
-    ],
-    updates
+    ["date", "category_id", "description", "amount", "payment_method_id", "supplier_id"], parsed.data
   );
-
-  if (fields.length === 0) {
-    return sendError(res, 400, "No fields to update");
-  }
-
+  if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
-
+  const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   try {
     const result = await pool.query(
-      `UPDATE daily_expenses SET ${fields.join(", ")}
-       WHERE id = $${idx}
-       RETURNING *`,
-      values
+      `UPDATE daily_expenses SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Daily expense not found");
-    }
-
+    if (result.rowCount === 0) return sendError(res, 404, "Daily expense not found");
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.delete("/v2/daily-expenses/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query("DELETE FROM daily_expenses WHERE id = $1", [
-      req.params.id
-    ]);
-    if (result.rowCount === 0) {
-      return sendError(res, 404, "Daily expense not found");
-    }
+    const result = await pool.query(`DELETE FROM daily_expenses WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) return sendError(res, 404, "Daily expense not found");
     res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
 app.get("/v2/fixed-expenses", async (req, res) => {
@@ -2623,6 +2295,11 @@ app.get("/v2/fixed-expenses", async (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
   const filters = [];
   const params = [];
+
+  if (req.tenantId) {
+    params.push(req.tenantId);
+    filters.push(`tenant_id = $${params.length}`);
+  }
 
   if (categoryId) {
     params.push(categoryId);
@@ -2648,9 +2325,12 @@ app.get("/v2/fixed-expenses", async (req, res) => {
 
 app.get("/v2/fixed-expenses/:id", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM fixed_expenses WHERE id = $1", [
-      req.params.id
-    ]);
+    const tenantClause = req.tenantId ? ` AND tenant_id = $2` : "";
+    const params = req.tenantId ? [req.params.id, req.tenantId] : [req.params.id];
+    const result = await pool.query(
+      `SELECT * FROM fixed_expenses WHERE id = $1${tenantClause}`,
+      params
+    );
     if (result.rowCount === 0) {
       return sendError(res, 404, "Fixed expense not found");
     }
@@ -2662,6 +2342,8 @@ app.get("/v2/fixed-expenses/:id", async (req, res) => {
 });
 
 app.post("/v2/fixed-expenses", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
   const parsed = createFixedExpenseSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -2680,8 +2362,8 @@ app.post("/v2/fixed-expenses", async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO fixed_expenses
-        (name, category_id, amount, due_day, payment_method_id, supplier_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+        (name, category_id, amount, due_day, payment_method_id, supplier_id, status, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
       [
         name,
@@ -2690,7 +2372,8 @@ app.post("/v2/fixed-expenses", async (req, res) => {
         due_day,
         payment_method_id,
         supplier_id ?? null,
-        status
+        status,
+        req.tenantId
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -2701,6 +2384,8 @@ app.post("/v2/fixed-expenses", async (req, res) => {
 });
 
 app.put("/v2/fixed-expenses/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
   const parsed = updateFixedExpenseSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -2725,11 +2410,12 @@ app.put("/v2/fixed-expenses/:id", async (req, res) => {
   }
 
   values.push(req.params.id);
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${values.push(req.tenantId)}` : "";
 
   try {
     const result = await pool.query(
       `UPDATE fixed_expenses SET ${fields.join(", ")}
-       WHERE id = $${idx}
+       WHERE id = $${idx}${tenantClause}
        RETURNING *`,
       values
     );
@@ -2746,10 +2432,14 @@ app.put("/v2/fixed-expenses/:id", async (req, res) => {
 });
 
 app.delete("/v2/fixed-expenses/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
   try {
-    const result = await pool.query("DELETE FROM fixed_expenses WHERE id = $1", [
-      req.params.id
-    ]);
+    const tenantClause = ` AND tenant_id = $2`;
+    const result = await pool.query(
+      `DELETE FROM fixed_expenses WHERE id = $1${tenantClause}`,
+      [req.params.id, req.tenantId]
+    );
     if (result.rowCount === 0) {
       return sendError(res, 404, "Fixed expense not found");
     }
