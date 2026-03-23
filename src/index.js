@@ -498,6 +498,17 @@ app.post("/auth/login", async (req, res) => {
       return sendError(res, 401, "Invalid credentials");
     }
 
+    // Verificar que el tenant esté activo (no aplica a super_admin sin tenant)
+    if (user.tenant_id) {
+      const tenantResult = await pool.query(
+        "SELECT status FROM tenants WHERE id = $1",
+        [user.tenant_id]
+      );
+      if (!tenantResult.rows.length || tenantResult.rows[0].status !== "active") {
+        return sendError(res, 403, "Tenant is inactive");
+      }
+    }
+
     const token = signToken(user);
     res.json({
       token,
