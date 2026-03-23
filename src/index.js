@@ -594,7 +594,7 @@ app.get("/me", requireAuth, async (req, res) => {
     const result = await pool.query(
       `SELECT u.id, u.email, u.role, u.tenant_id, u.created_at,
               t.name as tenant_name, t.logo_url as tenant_logo, 
-              t.primary_color, t.secondary_color
+              t.primary_color, t.secondary_color, t.enabled_modules
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = $1`,
@@ -2510,18 +2510,26 @@ app.post("/v2/super/tenants", requireAuth, requireSuperAdmin, async (req, res) =
     logo_url:        z.string().url().optional().nullable(),
     primary_color:   z.string().optional().nullable(),
     secondary_color: z.string().optional().nullable(),
-    plan:            z.string().optional().default("basic")
+    plan:            z.string().optional().default("basic"),
+    enabled_modules: z.record(z.boolean()).optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { name, logo_url, primary_color, secondary_color, plan } = parsed.data;
+  const { name, logo_url, primary_color, secondary_color, plan, enabled_modules } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO tenants (name, logo_url, primary_color, secondary_color, plan)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO tenants (name, logo_url, primary_color, secondary_color, plan, enabled_modules)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [name, logo_url ?? null, primary_color ?? null, secondary_color ?? null, plan]
+      [
+        name, 
+        logo_url ?? null, 
+        primary_color ?? null, 
+        secondary_color ?? null, 
+        plan, 
+        enabled_modules ? JSON.stringify(enabled_modules) : undefined
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -2531,7 +2539,7 @@ app.post("/v2/super/tenants", requireAuth, requireSuperAdmin, async (req, res) =
 });
 
 app.patch("/v2/super/tenants/:id", requireAuth, requireSuperAdmin, async (req, res) => {
-  const allowed = ["name", "logo_url", "primary_color", "secondary_color", "plan", "status"];
+  const allowed = ["name", "logo_url", "primary_color", "secondary_color", "plan", "status", "enabled_modules"];
   const { fields, values, idx } = buildUpdate(allowed, req.body);
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
