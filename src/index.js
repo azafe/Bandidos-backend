@@ -1829,8 +1829,8 @@ app.post("/v2/petshop/sales", async (req, res) => {
         `UPDATE petshop_products
          SET stock = stock - $1,
              updated_at = now()
-         WHERE id = $2`,
-        [item.quantity, item.product_id]
+         WHERE id = $2 AND tenant_id = $3`,
+        [item.quantity, item.product_id, req.tenantId]
       );
     }
 
