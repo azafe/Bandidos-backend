@@ -592,7 +592,12 @@ app.use((req, res, next) => {
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, email, role, tenant_id, created_at FROM users WHERE id = $1",
+      `SELECT u.id, u.email, u.role, u.tenant_id, u.created_at,
+              t.name as tenant_name, t.logo_url as tenant_logo, 
+              t.primary_color, t.secondary_color
+       FROM users u
+       LEFT JOIN tenants t ON t.id = u.tenant_id
+       WHERE u.id = $1`,
       [req.user.sub]
     );
 
