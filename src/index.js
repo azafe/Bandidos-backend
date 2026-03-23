@@ -501,11 +501,14 @@ app.post("/auth/login", async (req, res) => {
     // Verificar que el tenant esté activo (no aplica a super_admin sin tenant)
     if (user.tenant_id) {
       const tenantResult = await pool.query(
-        "SELECT status FROM tenants WHERE id = $1",
+        "SELECT status, suspended_reason FROM tenants WHERE id = $1",
         [user.tenant_id]
       );
       if (!tenantResult.rows.length || tenantResult.rows[0].status !== "active") {
-        return sendError(res, 403, "Tenant is inactive");
+        return res.status(403).json({
+          message: "Tenant is inactive",
+          suspended_reason: tenantResult.rows[0]?.suspended_reason ?? null,
+        });
       }
     }
 
@@ -600,10 +603,13 @@ app.use((req, res, next) => {
   // Verificar que el tenant del usuario esté activo.
   // Consultamos la DB solo si el usuario tiene tenant_id.
   if (req.tenantId) {
-    pool.query("SELECT status FROM tenants WHERE id = $1", [req.tenantId])
+    pool.query("SELECT status, suspended_reason FROM tenants WHERE id = $1", [req.tenantId])
       .then(({ rows }) => {
         if (!rows.length || rows[0].status !== "active") {
-          return sendError(res, 403, "Tenant is inactive");
+          return res.status(403).json({
+            message: "Tenant is inactive",
+            suspended_reason: rows[0]?.suspended_reason ?? null,
+          });
         }
         next();
       })
@@ -617,8 +623,9 @@ app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.email, u.role, u.tenant_id, u.created_at,
-              t.name as tenant_name, t.logo_url as tenant_logo, 
-              t.primary_color, t.secondary_color, t.enabled_modules
+              t.name as tenant_name, t.logo_url as tenant_logo,
+              t.primary_color, t.secondary_color, t.enabled_modules,
+              t.status as tenant_status, t.suspended_reason
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = $1`,
@@ -2567,7 +2574,7 @@ app.post("/v2/super/tenants", requireAuth, requireSuperAdmin, async (req, res) =
 });
 
 app.patch("/v2/super/tenants/:id", requireAuth, requireSuperAdmin, async (req, res) => {
-  const allowed = ["name", "logo_url", "primary_color", "secondary_color", "plan", "status", "enabled_modules"];
+  const allowed = ["name", "logo_url", "primary_color", "secondary_color", "plan", "status", "suspended_reason", "enabled_modules"];
   const { fields, values, idx } = buildUpdate(allowed, req.body);
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
