@@ -2236,6 +2236,25 @@ app.post("/v2/suppliers/:id/movements", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
+app.put("/v2/supplier-movements/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = createSupplierMovementSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { date, tipo, monto, descripcion, referencia } = parsed.data;
+  const params = [date, tipo, monto, descripcion ?? "", referencia ?? null, req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
+  try {
+    const result = await pool.query(
+      `UPDATE supplier_movements
+       SET date=$1, tipo=$2, monto=$3, descripcion=$4, referencia=$5
+       WHERE id=$6${tenantClause} RETURNING *`,
+      params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Movement not found");
+    res.json(result.rows[0]);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
 app.delete("/v2/supplier-movements/:id", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
