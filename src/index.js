@@ -247,6 +247,14 @@ const updateSupplierSchema = z.object({
   notes: z.string().min(1).optional().nullable()
 });
 
+const createSupplierMovementSchema = z.object({
+  date:        dateSchema,
+  tipo:        z.enum(["cargo", "pago"]),
+  monto:       z.coerce.number().positive(),
+  descripcion: z.string().min(1),
+  referencia:  z.string().optional().nullable(),
+});
+
 const createExpenseCategorySchema = z.object({
   name: z.string().min(1)
 });
@@ -2110,8 +2118,18 @@ app.get("/v2/suppliers", async (req, res) => {
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-  const sql = `SELECT suppliers.*,
-    payment_methods.name AS payment_method_name
+  const sql = `
+    SELECT
+      suppliers.*,
+      payment_methods.name AS payment_method_name,
+      COALESCE((
+        SELECT
+          SUM(CASE WHEN tipo = 'cargo' THEN monto ELSE 0 END) -
+          SUM(CASE WHEN tipo = 'pago'  THEN monto ELSE 0 END)
+        FROM supplier_movements sm
+        WHERE sm.supplier_id = suppliers.id
+          AND sm.tenant_id   = suppliers.tenant_id
+      ), 0) AS saldo
     FROM suppliers
     LEFT JOIN payment_methods
       ON payment_methods.id = suppliers.payment_method_id
@@ -2181,6 +2199,53 @@ app.delete("/v2/suppliers/:id", async (req, res) => {
   try {
     const result = await pool.query(`DELETE FROM suppliers WHERE id = $1${tenantClause}`, params);
     if (result.rowCount === 0) return sendError(res, 404, "Supplier not found");
+    res.json({ ok: true });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+// ── Supplier movements ────────────────────────────────────────────────────────
+
+app.get("/v2/suppliers/:id/movements", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
+  try {
+    const result = await pool.query(
+      `SELECT * FROM supplier_movements
+       WHERE supplier_id = $1${tenantClause}
+       ORDER BY date ASC, created_at ASC`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.post("/v2/suppliers/:id/movements", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = createSupplierMovementSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { date, tipo, monto, descripcion, referencia } = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO supplier_movements
+         (supplier_id, tenant_id, date, tipo, monto, descripcion, referencia)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [req.params.id, req.tenantId, date, tipo, monto, descripcion, referencia ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.delete("/v2/supplier-movements/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const params = [req.params.id];
+  const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
+  try {
+    const result = await pool.query(
+      `DELETE FROM supplier_movements WHERE id = $1${tenantClause}`,
+      params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Movement not found");
     res.json({ ok: true });
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
