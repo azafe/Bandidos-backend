@@ -251,7 +251,7 @@ const createSupplierMovementSchema = z.object({
   date:        dateSchema,
   tipo:        z.enum(["cargo", "pago"]),
   monto:       z.coerce.number().positive(),
-  descripcion: z.string().min(1),
+  descripcion: z.string().optional().nullable(),
   referencia:  z.string().optional().nullable(),
 });
 
@@ -2230,7 +2230,7 @@ app.post("/v2/suppliers/:id/movements", async (req, res) => {
          (supplier_id, tenant_id, date, tipo, monto, descripcion, referencia)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [req.params.id, req.tenantId, date, tipo, monto, descripcion, referencia ?? null]
+      [req.params.id, req.tenantId, date, tipo, monto, descripcion ?? "", referencia ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
