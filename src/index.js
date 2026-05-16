@@ -2705,6 +2705,71 @@ app.post("/v2/super/tenants/:id/admin", requireAuth, requireSuperAdmin, async (r
   }
 });
 
+// ── Comunicaciones enviadas ──────────────────────────────────────────────────
+
+const createComunicacionSchema = z.object({
+  petId: z.string().uuid(),
+  type: z.enum(["turno", "cumple"]),
+  petName: z.string().min(1),
+  ownerName: z.string().optional().nullable(),
+});
+
+app.get("/v2/comunicaciones", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `SELECT id, pet_id, type, pet_name, owner_name, sent_at
+       FROM comunicaciones_enviadas
+       WHERE tenant_id = $1
+         AND (
+           (type = 'turno'  AND sent_at >= CURRENT_DATE - INTERVAL '90 days') OR
+           (type = 'cumple' AND sent_at >= CURRENT_DATE - INTERVAL '365 days')
+         )
+       ORDER BY sent_at DESC`,
+      [req.tenantId]
+    );
+    res.json(result.rows.map((r) => ({
+      id: r.id,
+      petId: r.pet_id,
+      type: r.type,
+      petName: r.pet_name,
+      ownerName: r.owner_name,
+      sentAt: r.sent_at,
+    })));
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.post("/v2/comunicaciones", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = createComunicacionSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { petId, type, petName, ownerName } = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO comunicaciones_enviadas
+         (tenant_id, pet_id, type, pet_name, owner_name, sent_at, sent_by)
+       VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6)
+       ON CONFLICT (tenant_id, pet_id, type)
+       DO UPDATE SET
+         pet_name   = EXCLUDED.pet_name,
+         owner_name = EXCLUDED.owner_name,
+         sent_at    = EXCLUDED.sent_at,
+         sent_by    = EXCLUDED.sent_by
+       RETURNING id, pet_id, type, pet_name, owner_name, sent_at`,
+      [req.tenantId, petId, type, petName, ownerName ?? null, req.user?.sub ?? null]
+    );
+    const r = result.rows[0];
+    res.status(201).json({
+      id: r.id,
+      petId: r.pet_id,
+      type: r.type,
+      petName: r.pet_name,
+      ownerName: r.owner_name,
+      sentAt: r.sent_at,
+    });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 
 app.use((err, _req, res, _next) => {
