@@ -1583,7 +1583,16 @@ app.put("/agenda/:id", async (req, res) => {
     );
 
     if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
-    res.json(result.rows[0]);
+    const turno = result.rows[0];
+
+    if (updates.status === "finished" && turno.pet_id) {
+      await pool.query(
+        `DELETE FROM comunicaciones_enviadas WHERE tenant_id = $1 AND pet_id = $2 AND type = 'turno'`,
+        [req.tenantId, turno.pet_id]
+      );
+    }
+
+    res.json(turno);
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -2736,6 +2745,19 @@ app.get("/v2/comunicaciones", async (req, res) => {
       ownerName: r.owner_name,
       sentAt: r.sent_at,
     })));
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.delete("/v2/comunicaciones/:petId/:type", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const { petId, type } = req.params;
+  if (!["turno", "cumple"].includes(type)) return sendError(res, 400, "Invalid type");
+  try {
+    await pool.query(
+      `DELETE FROM comunicaciones_enviadas WHERE tenant_id = $1 AND pet_id = $2 AND type = $3`,
+      [req.tenantId, petId, type]
+    );
+    res.json({ ok: true });
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
