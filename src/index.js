@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import webpush from "web-push";
 import { z } from "zod";
 import { pool } from "./db.js";
 import { createEmailClient } from "./email.js";
@@ -14,10 +15,44 @@ import {
 } from "./auth/passwordResetService.js";
 import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 
+webpush.setVapidDetails(
+  process.env.VAPID_EMAIL,
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
+);
+
+async function sendPushToTenant(tenantId, payload, excludeDeviceId = null) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT device_id, endpoint, p256dh, auth FROM push_subscriptions WHERE tenant_id = $1`,
+      [tenantId]
+    );
+    const message = JSON.stringify(payload);
+    for (const sub of rows) {
+      if (excludeDeviceId && sub.device_id === excludeDeviceId) continue;
+      try {
+        await webpush.sendNotification(
+          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          message
+        );
+      } catch (err) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          await pool.query(
+            `DELETE FROM push_subscriptions WHERE tenant_id = $1 AND device_id = $2`,
+            [tenantId, sub.device_id]
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[push] Error enviando notificaciones:", err);
+  }
+}
+
 const app = express();
 
 const corsOrigin = process.env.FRONTEND_ORIGIN || "*";
-app.use(cors({ origin: corsOrigin }));
+app.use(cors({ origin: corsOrigin, allowedHeaders: ["Content-Type", "Authorization", "X-Device-Id"] }));
 app.use(express.json());
 
 const statusSchema = z.enum(["active", "inactive"]);
@@ -445,6 +480,10 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/push/vapid-public-key", (_req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+});
+
 app.post("/auth/register", async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
@@ -629,6 +668,38 @@ app.use((req, res, next) => {
   } else {
     next();
   }
+});
+
+app.post("/push/subscribe", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const schema = z.object({
+    device_id: z.string().min(1),
+    endpoint: z.string().url(),
+    p256dh: z.string().min(1),
+    auth: z.string().min(1),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid subscription data");
+  const { device_id, endpoint, p256dh, auth } = parsed.data;
+  await pool.query(
+    `INSERT INTO push_subscriptions (tenant_id, device_id, endpoint, p256dh, auth)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (tenant_id, device_id)
+     DO UPDATE SET endpoint = $3, p256dh = $4, auth = $5`,
+    [req.tenantId, device_id, endpoint, p256dh, auth]
+  );
+  res.status(201).json({ ok: true });
+});
+
+app.delete("/push/subscribe", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const { device_id } = req.body;
+  if (!device_id) return sendError(res, 400, "device_id required");
+  await pool.query(
+    `DELETE FROM push_subscriptions WHERE tenant_id = $1 AND device_id = $2`,
+    [req.tenantId, device_id]
+  );
+  res.json({ ok: true });
 });
 
 app.get("/me", requireAuth, async (req, res) => {
@@ -1529,7 +1600,13 @@ app.post("/agenda", async (req, res) => {
         traslado ?? false, traslado_direccion ?? null
       ]
     );
-    res.status(201).json(result.rows[0]);
+    const turnoCreado = result.rows[0];
+    res.status(201).json(turnoCreado);
+    const deviceId = req.headers["x-device-id"] || null;
+    sendPushToTenant(req.tenantId, {
+      title: "Nuevo turno agendado",
+      body: `${turnoCreado.pet_name} · ${String(turnoCreado.time).slice(0, 5)}`,
+    }, deviceId);
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -1603,6 +1680,13 @@ app.put("/agenda/:id", async (req, res) => {
     }
 
     res.json(turno);
+    if (updates.status === "finished") {
+      const deviceId = req.headers["x-device-id"] || null;
+      sendPushToTenant(req.tenantId, {
+        title: "Turno finalizado",
+        body: `${turno.pet_name} · ${String(turno.time).slice(0, 5)}`,
+      }, deviceId);
+    }
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
