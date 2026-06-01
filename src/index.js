@@ -33,6 +33,11 @@ function formatPushDate(date) {
   return `${day}/${month}`;
 }
 
+function formatPushPrice(price) {
+  if (!price || Number(price) === 0) return null;
+  return "$" + Number(price).toLocaleString("es-AR", { maximumFractionDigits: 0 });
+}
+
 async function sendPushToTenant(tenantId, payload, excludeDeviceId = null) {
   if (!vapidConfigured) return;
   try {
@@ -1695,9 +1700,19 @@ app.put("/agenda/:id", async (req, res) => {
     res.json(turno);
     if (updates.status === "finished") {
       const deviceId = req.headers["x-device-id"] || null;
+      let serviceName = null;
+      if (turno.service_type_id) {
+        const svcResult = await pool.query(
+          `SELECT name FROM service_types WHERE id = $1`,
+          [turno.service_type_id]
+        );
+        serviceName = svcResult.rows[0]?.name || null;
+      }
+      const pricePart = formatPushPrice(turno.price);
+      const bodyParts = [turno.pet_name, serviceName, pricePart].filter(Boolean);
       sendPushToTenant(req.tenantId, {
         title: "Turno finalizado",
-        body: `${formatPushDate(turno.date)} · ${String(turno.time).slice(0, 5)} · ${turno.pet_name}`,
+        body: bodyParts.join(" · "),
       }, deviceId);
     }
   } catch (err) {
