@@ -15,13 +15,19 @@ import {
 } from "./auth/passwordResetService.js";
 import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 
-webpush.setVapidDetails(
-  process.env.VAPID_EMAIL,
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY
-);
+const vapidConfigured = process.env.VAPID_EMAIL && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY;
+if (vapidConfigured) {
+  webpush.setVapidDetails(
+    process.env.VAPID_EMAIL,
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn("[push] Variables VAPID no configuradas — notificaciones push desactivadas.");
+}
 
 async function sendPushToTenant(tenantId, payload, excludeDeviceId = null) {
+  if (!vapidConfigured) return;
   try {
     const { rows } = await pool.query(
       `SELECT device_id, endpoint, p256dh, auth FROM push_subscriptions WHERE tenant_id = $1`,
