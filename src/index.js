@@ -26,6 +26,13 @@ if (vapidConfigured) {
   console.warn("[push] Variables VAPID no configuradas — notificaciones push desactivadas.");
 }
 
+function formatPushDate(date) {
+  const d = new Date(date);
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${day}/${month}`;
+}
+
 async function sendPushToTenant(tenantId, payload, excludeDeviceId = null) {
   if (!vapidConfigured) return;
   try {
@@ -1611,7 +1618,7 @@ app.post("/agenda", async (req, res) => {
     const deviceId = req.headers["x-device-id"] || null;
     sendPushToTenant(req.tenantId, {
       title: "Nuevo turno agendado",
-      body: `${turnoCreado.pet_name} · ${String(turnoCreado.time).slice(0, 5)}`,
+      body: `${formatPushDate(turnoCreado.date)} · ${String(turnoCreado.time).slice(0, 5)} · ${turnoCreado.pet_name}`,
     }, deviceId);
   } catch (err) {
     console.error(err);
@@ -1690,7 +1697,7 @@ app.put("/agenda/:id", async (req, res) => {
       const deviceId = req.headers["x-device-id"] || null;
       sendPushToTenant(req.tenantId, {
         title: "Turno finalizado",
-        body: `${turno.pet_name} · ${String(turno.time).slice(0, 5)}`,
+        body: `${formatPushDate(turno.date)} · ${String(turno.time).slice(0, 5)} · ${turno.pet_name}`,
       }, deviceId);
     }
   } catch (err) {
