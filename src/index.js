@@ -122,7 +122,9 @@ const createAgendaSchema = z.object({
   deposit_amount: z.coerce.number().min(0).optional().default(0),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
-  status: agendaStatusSchema.optional().default("reserved")
+  status: agendaStatusSchema.optional().default("reserved"),
+  traslado: z.boolean().optional().default(false),
+  traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
 });
 
 const updateAgendaSchema = z.object({
@@ -139,7 +141,9 @@ const updateAgendaSchema = z.object({
   deposit_amount: z.coerce.number().min(0).optional(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
-  status: agendaStatusSchema.optional()
+  status: agendaStatusSchema.optional(),
+  traslado: z.boolean().optional(),
+  traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
 });
 
 const createPetshopProductSchema = z.object({
@@ -1505,20 +1509,24 @@ app.post("/agenda", async (req, res) => {
     deposit_amount,
     notes,
     groomer_id,
-    status
+    status,
+    traslado,
+    traslado_direccion
   } = parsed.data;
 
   try {
     const result = await pool.query(
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
-        payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
+        traslado, traslado_direccion)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING *`,
       [
         date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
         service_type_id, payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
-        notes ?? null, groomer_id ?? null, status, req.tenantId
+        notes ?? null, groomer_id ?? null, status, req.tenantId,
+        traslado ?? false, traslado_direccion ?? null
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -1551,7 +1559,9 @@ app.put("/agenda/:id", async (req, res) => {
       "deposit_amount",
       "notes",
       "groomer_id",
-      "status"
+      "status",
+      "traslado",
+      "traslado_direccion"
     ],
     updates
   );
