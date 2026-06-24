@@ -3081,7 +3081,7 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
     const addValue = (concept, pmId, value) => {
       const val = Number(value || 0);
       if (val === 0) return;
-      const key = `${concept}-${pmId}`;
+      const key = `${concept}:${pmId}`;
       const current = map.get(key) || 0;
       map.set(key, current + val);
     };
@@ -3109,7 +3109,7 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
 
     const response = [];
     for (const [key, amount] of map.entries()) {
-      const [concept, payment_method_id] = key.split("-");
+      const [concept, payment_method_id] = key.split(":");
       response.push({
         concept,
         payment_method_id,
