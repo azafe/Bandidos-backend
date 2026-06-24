@@ -3032,20 +3032,20 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
   const tenantId = req.tenantId;
 
   try {
-    // 1. Servicios desde agenda_turnos (status = finished), descontando deposit_amount para no duplicar señas
-    const agendaServices = await pool.query(
-      `SELECT payment_method_id, SUM(COALESCE(price, 0) - COALESCE(deposit_amount, 0)) AS total
-       FROM agenda_turnos
-       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND payment_method_id IS NOT NULL
-       GROUP BY payment_method_id`,
-      [queryDate, tenantId]
-    );
-
-    // 2. Servicios desde la tabla services directamente
+    // 1. Servicios desde la tabla services directamente
     const tableServices = await pool.query(
       `SELECT payment_method_id, SUM(COALESCE(price, 0)) AS total
        FROM services
        WHERE date = $1 AND tenant_id = $2 AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    // 2. Señas de turnos finalizados (para restar del total de servicios y evitar duplicaciones)
+    const finishedDeposits = await pool.query(
+      `SELECT payment_method_id, SUM(COALESCE(deposit_amount, 0)) AS total
+       FROM agenda_turnos
+       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND deposit_amount > 0 AND payment_method_id IS NOT NULL
        GROUP BY payment_method_id`,
       [queryDate, tenantId]
     );
@@ -3087,13 +3087,13 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
       map.set(key, current + val);
     };
 
-    // Agregar servicios de agenda turnos
-    for (const r of agendaServices.rows) {
-      addValue("servicios", r.payment_method_id, r.total);
-    }
     // Agregar servicios de la tabla servicios
     for (const r of tableServices.rows) {
       addValue("servicios", r.payment_method_id, r.total);
+    }
+    // Restar señas de turnos finalizados para obtener el valor neto cobrado hoy por servicios
+    for (const r of finishedDeposits.rows) {
+      addValue("servicios", r.payment_method_id, -Number(r.total));
     }
     // Agregar señas de agenda turnos
     for (const r of agendaDeposits.rows) {
