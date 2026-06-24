@@ -3032,7 +3032,17 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
   const tenantId = req.tenantId;
 
   try {
-    // 1. Servicios desde la tabla services directamente
+    // 1. Servicios desde turnos finalizados en agenda (neto: precio - seña anticipada)
+    const agendaServices = await pool.query(
+      `SELECT payment_method_id,
+              SUM(COALESCE(price, 0) - COALESCE(deposit_amount, 0)) AS total
+       FROM agenda_turnos
+       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    // 1b. Servicios cargados manualmente en el módulo de servicios
     const tableServices = await pool.query(
       `SELECT payment_method_id, SUM(COALESCE(price, 0)) AS total
        FROM services
@@ -3041,16 +3051,7 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
       [queryDate, tenantId]
     );
 
-    // 2. Señas de turnos finalizados (para restar del total de servicios y evitar duplicaciones)
-    const finishedDeposits = await pool.query(
-      `SELECT payment_method_id, SUM(COALESCE(deposit_amount, 0)) AS total
-       FROM agenda_turnos
-       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND deposit_amount > 0 AND payment_method_id IS NOT NULL
-       GROUP BY payment_method_id`,
-      [queryDate, tenantId]
-    );
-
-    // 3. Señas desde agenda_turnos (status != cancelled)
+    // 2. Señas desde agenda_turnos (status != cancelled)
     const agendaDeposits = await pool.query(
       `SELECT payment_method_id, SUM(COALESCE(deposit_amount, 0)) AS total
        FROM agenda_turnos
@@ -3087,13 +3088,13 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
       map.set(key, current + val);
     };
 
-    // Agregar servicios de la tabla servicios
-    for (const r of tableServices.rows) {
+    // Agregar servicios desde turnos finalizados (neto de seña)
+    for (const r of agendaServices.rows) {
       addValue("servicios", r.payment_method_id, r.total);
     }
-    // Restar señas de turnos finalizados para obtener el valor neto cobrado hoy por servicios
-    for (const r of finishedDeposits.rows) {
-      addValue("servicios", r.payment_method_id, -Number(r.total));
+    // Agregar servicios cargados manualmente
+    for (const r of tableServices.rows) {
+      addValue("servicios", r.payment_method_id, r.total);
     }
     // Agregar señas de agenda turnos
     for (const r of agendaDeposits.rows) {
