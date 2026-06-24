@@ -2963,7 +2963,8 @@ app.get("/v2/daily-incomes", async (req, res) => {
         payment_method_id: r.payment_method_id,
         amount: Number(r.amount)
       })),
-      notes: notesResult.rows[0]?.notes ?? ""
+      notes: notesResult.rows[0]?.notes ?? "",
+      is_declared: notesResult.rowCount > 0
     });
   } catch (err) {
     console.error(err);
