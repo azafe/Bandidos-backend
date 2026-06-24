@@ -178,6 +178,7 @@ const createAgendaSchema = z.object({
   status: agendaStatusSchema.optional().default("reserved"),
   traslado: z.boolean().optional().default(false),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
+  traslado_amount: z.coerce.number().min(0).optional().default(0),
 });
 
 const updateAgendaSchema = z.object({
@@ -197,6 +198,7 @@ const updateAgendaSchema = z.object({
   status: agendaStatusSchema.optional(),
   traslado: z.boolean().optional(),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
+  traslado_amount: z.coerce.number().min(0).optional(),
 });
 
 const createPetshopProductSchema = z.object({
@@ -1600,7 +1602,8 @@ app.post("/agenda", async (req, res) => {
     groomer_id,
     status,
     traslado,
-    traslado_direccion
+    traslado_direccion,
+    traslado_amount
   } = parsed.data;
 
   try {
@@ -1608,14 +1611,14 @@ app.post("/agenda", async (req, res) => {
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
         payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
-        traslado, traslado_direccion)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        traslado, traslado_direccion, traslado_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING *`,
       [
         date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
         service_type_id, payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
         notes ?? null, groomer_id ?? null, status, req.tenantId,
-        traslado ?? false, traslado_direccion ?? null
+        traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0
       ]
     );
     const turnoCreado = result.rows[0];
@@ -1656,7 +1659,8 @@ app.put("/agenda/:id", async (req, res) => {
       "groomer_id",
       "status",
       "traslado",
-      "traslado_direccion"
+      "traslado_direccion",
+      "traslado_amount"
     ],
     updates
   );
@@ -2913,6 +2917,214 @@ app.post("/v2/comunicaciones", async (req, res) => {
     });
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// INGRESO DIARIOS (Daily Incomes)
+// ────────────────────────────────────────────────────────────────────────────
+
+const dailyIncomeItemSchema = z.object({
+  concept: z.string().min(1),
+  payment_method_id: z.string().uuid(),
+  amount: z.coerce.number().min(0),
+});
+
+const saveDailyIncomesSchema = z.object({
+  date: dateSchema,
+  incomes: z.array(dailyIncomeItemSchema),
+  notes: z.string().nullable().optional(),
+});
+
+app.get("/v2/daily-incomes", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const date = typeof req.query.date === "string" ? req.query.date.trim() : "";
+  const parsedDate = dateSchema.safeParse(date);
+  if (!parsedDate.success) return sendError(res, 400, "Invalid date");
+
+  const queryDate = parsedDate.data;
+  try {
+    const incomesResult = await pool.query(
+      `SELECT concept, payment_method_id, amount 
+       FROM daily_incomes 
+       WHERE date = $1 AND tenant_id = $2`,
+      [queryDate, req.tenantId]
+    );
+
+    const notesResult = await pool.query(
+      `SELECT notes 
+       FROM daily_income_notes 
+       WHERE date = $1 AND tenant_id = $2`,
+      [queryDate, req.tenantId]
+    );
+
+    res.json({
+      date: queryDate,
+      incomes: incomesResult.rows.map(r => ({
+        concept: r.concept,
+        payment_method_id: r.payment_method_id,
+        amount: Number(r.amount)
+      })),
+      notes: notesResult.rows[0]?.notes ?? ""
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/daily-incomes", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = saveDailyIncomesSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+
+  const { date, incomes, notes } = parsed.data;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // 1. Limpiar ingresos anteriores para esa fecha y tenant
+    await client.query(
+      "DELETE FROM daily_incomes WHERE date = $1 AND tenant_id = $2",
+      [date, req.tenantId]
+    );
+
+    // 2. Insertar nuevos ingresos con monto > 0
+    for (const inc of incomes) {
+      if (inc.amount > 0) {
+        await client.query(
+          `INSERT INTO daily_incomes (date, concept, payment_method_id, amount, tenant_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [date, inc.concept, inc.payment_method_id, inc.amount, req.tenantId]
+        );
+      }
+    }
+
+    // 3. Upsert de las notas/observaciones del día
+    await client.query(
+      `INSERT INTO daily_income_notes (tenant_id, date, notes)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, date) 
+       DO UPDATE SET notes = EXCLUDED.notes, updated_at = now()`,
+      [req.tenantId, date, notes ?? null]
+    );
+
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/v2/daily-incomes/system-totals", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const date = typeof req.query.date === "string" ? req.query.date.trim() : "";
+  const parsedDate = dateSchema.safeParse(date);
+  if (!parsedDate.success) return sendError(res, 400, "Invalid date");
+
+  const queryDate = parsedDate.data;
+  const tenantId = req.tenantId;
+
+  try {
+    // 1. Servicios desde agenda_turnos (status = finished), descontando deposit_amount para no duplicar señas
+    const agendaServices = await pool.query(
+      `SELECT payment_method_id, SUM(COALESCE(price, 0) - COALESCE(deposit_amount, 0)) AS total
+       FROM agenda_turnos
+       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    // 2. Servicios desde la tabla services directamente
+    const tableServices = await pool.query(
+      `SELECT payment_method_id, SUM(COALESCE(price, 0)) AS total
+       FROM services
+       WHERE date = $1 AND tenant_id = $2 AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    // 3. Señas desde agenda_turnos (status != cancelled)
+    const agendaDeposits = await pool.query(
+      `SELECT payment_method_id, SUM(COALESCE(deposit_amount, 0)) AS total
+       FROM agenda_turnos
+       WHERE date = $1 AND tenant_id = $2 AND status != 'cancelled' AND deposit_amount > 0 AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    // 4. Traslados desde agenda_turnos (status = finished, traslado = true, traslado_amount > 0)
+    const agendaTraslados = await pool.query(
+      `SELECT payment_method_id, SUM(COALESCE(traslado_amount, 0)) AS total
+       FROM agenda_turnos
+       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND traslado = true AND traslado_amount > 0 AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    // 5. Ventas PetShop desde petshop_sales
+    const petshopSales = await pool.query(
+      `SELECT payment_method_id, SUM(COALESCE(total, 0)) AS total
+       FROM petshop_sales
+       WHERE date = $1 AND tenant_id = $2 AND payment_method_id IS NOT NULL
+       GROUP BY payment_method_id`,
+      [queryDate, tenantId]
+    );
+
+    const map = new Map();
+
+    const addValue = (concept, pmId, value) => {
+      const val = Number(value || 0);
+      if (val === 0) return;
+      const key = `${concept}-${pmId}`;
+      const current = map.get(key) || 0;
+      map.set(key, current + val);
+    };
+
+    // Agregar servicios de agenda turnos
+    for (const r of agendaServices.rows) {
+      addValue("servicios", r.payment_method_id, r.total);
+    }
+    // Agregar servicios de la tabla servicios
+    for (const r of tableServices.rows) {
+      addValue("servicios", r.payment_method_id, r.total);
+    }
+    // Agregar señas de agenda turnos
+    for (const r of agendaDeposits.rows) {
+      addValue("señas", r.payment_method_id, r.total);
+    }
+    // Agregar traslados
+    for (const r of agendaTraslados.rows) {
+      addValue("traslados", r.payment_method_id, r.total);
+    }
+    // Agregar ventas petshop
+    for (const r of petshopSales.rows) {
+      addValue("ventas_petshop", r.payment_method_id, r.total);
+    }
+
+    const response = [];
+    for (const [key, amount] of map.entries()) {
+      const [concept, payment_method_id] = key.split("-");
+      response.push({
+        concept,
+        payment_method_id,
+        amount
+      });
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 
 // ────────────────────────────────────────────────────────────────────────────
 
