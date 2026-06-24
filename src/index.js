@@ -181,6 +181,26 @@ const createAgendaSchema = z.object({
   traslado_amount: z.coerce.number().min(0).optional().default(0),
 });
 
+const createAgendaWithNewPetSchema = z.object({
+  date: dateSchema,
+  time: timeSchema,
+  duration: z.coerce.number().int().min(1).optional().default(60),
+  service_type_id: z.string().uuid().optional().nullable(),
+  payment_method_id: z.string().uuid().optional().nullable(),
+  price: z.coerce.number().min(0).optional().nullable(),
+  deposit_amount: z.coerce.number().min(0).optional().default(0),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  groomer_id: z.string().uuid().optional().nullable(),
+  status: agendaStatusSchema.optional().default("reserved"),
+  traslado: z.boolean().optional().default(false),
+  traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
+  traslado_amount: z.coerce.number().min(0).optional().default(0),
+  pet_name: z.string().min(1),
+  pet_breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  owner_name: z.string().min(1),
+  owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+});
+
 const updateAgendaSchema = z.object({
   date: dateSchema.optional(),
   time: timeSchema.optional(),
@@ -1631,6 +1651,70 @@ app.post("/agenda", async (req, res) => {
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/agenda/with-new-pet", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = createAgendaWithNewPetSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+
+  const {
+    date, time, duration, service_type_id, payment_method_id, price,
+    deposit_amount, notes, groomer_id, status, traslado, traslado_direccion,
+    traslado_amount, pet_name, pet_breed, owner_name, owner_phone,
+  } = parsed.data;
+  const tenantId = req.tenantId;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const customerResult = await client.query(
+      `INSERT INTO customers (name, phone, tenant_id) VALUES ($1, $2, $3) RETURNING id`,
+      [owner_name, owner_phone ?? null, tenantId]
+    );
+    const customerId = customerResult.rows[0].id;
+
+    const petResult = await client.query(
+      `INSERT INTO pets (name, breed, owner_name, owner_phone, customer_id, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [pet_name, pet_breed ?? null, owner_name, owner_phone ?? null, customerId, tenantId]
+    );
+    const petId = petResult.rows[0].id;
+
+    const turnoResult = await client.query(
+      `INSERT INTO agenda_turnos
+         (date, time, duration, pet_id, pet_name, breed, owner_name,
+          service_type_id, payment_method_id, price, deposit_amount, notes,
+          groomer_id, status, tenant_id, traslado, traslado_direccion, traslado_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       RETURNING *`,
+      [
+        date, time, duration, petId, pet_name, pet_breed ?? null, owner_name,
+        service_type_id ?? null, payment_method_id ?? null, price ?? null,
+        deposit_amount ?? 0, notes ?? null, groomer_id ?? null, status ?? "reserved",
+        tenantId, traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0,
+      ]
+    );
+
+    await client.query("COMMIT");
+    const turno = turnoResult.rows[0];
+    res.status(201).json(turno);
+
+    const deviceId = req.headers["x-device-id"] || null;
+    sendPushToTenant(tenantId, {
+      title: "Nuevo turno agendado",
+      body: `${formatPushDate(turno.date)} · ${String(turno.time).slice(0, 5)} · ${turno.pet_name}`,
+    }, deviceId);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
   }
 });
 
