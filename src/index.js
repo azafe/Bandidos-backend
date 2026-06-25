@@ -246,6 +246,7 @@ const updatePetshopProductSchema = z.object({
 const createPetshopSaleSchema = z.object({
   date: dateSchema,
   customer_id: z.string().uuid().optional().nullable(),
+  stylist_id: z.string().uuid().optional().nullable(),
   payment_method_id: z.string().uuid(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   total: z.coerce.number().min(0),
@@ -2055,7 +2056,7 @@ app.post("/v2/petshop/sales", async (req, res) => {
   const parsed = createPetshopSaleSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { date, customer_id, payment_method_id, notes, total, items } = parsed.data;
+  const { date, customer_id, stylist_id, payment_method_id, notes, total, items } = parsed.data;
   const productIds = [...new Set(items.map((item) => item.product_id))];
   const client = await pool.connect();
 
@@ -2074,10 +2075,10 @@ app.post("/v2/petshop/sales", async (req, res) => {
 
     const saleResult = await client.query(
       `INSERT INTO petshop_sales
-       (date, customer_id, payment_method_id, notes, total, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+       (date, customer_id, stylist_id, payment_method_id, notes, total, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [date, customer_id ?? null, payment_method_id, notes ?? null, total, req.tenantId]
+      [date, customer_id ?? null, stylist_id ?? null, payment_method_id, notes ?? null, total, req.tenantId]
     );
     const sale = saleResult.rows[0];
     const saleItems = [];
