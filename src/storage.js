@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import WebSocket from "ws";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -11,7 +12,13 @@ function getClient() {
     throw new Error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are required for photo uploads");
   }
   if (!client) {
-    client = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    // We only use Storage, never Realtime, but the client always spins up a
+    // RealtimeClient internally, which needs a WebSocket implementation on
+    // Node runtimes older than 22 (no global WebSocket) — Railway's runtime
+    // here is one of those, so it crashes on createClient() without this.
+    client = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      realtime: { transport: WebSocket },
+    });
   }
   return client;
 }
