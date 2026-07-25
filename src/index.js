@@ -14,6 +14,7 @@ import {
   resetPasswordSchema
 } from "./auth/passwordResetService.js";
 import { createPasswordResetStore } from "./auth/passwordResetStore.js";
+import { uploadPhoto } from "./storage.js";
 
 const vapidConfigured = process.env.VAPID_EMAIL && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY;
 if (vapidConfigured) {
@@ -71,7 +72,7 @@ const app = express();
 
 const corsOrigin = process.env.FRONTEND_ORIGIN || "*";
 app.use(cors({ origin: corsOrigin, allowedHeaders: ["Content-Type", "Authorization", "X-Device-Id"] }));
-app.use(express.json());
+app.use(express.json({ limit: "6mb" }));
 
 const statusSchema = z.enum(["active", "inactive"]);
 const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled"]);
@@ -384,6 +385,30 @@ const updateFixedExpenseSchema = z.object({
 const sendError = (res, status, message) => {
   return res.status(status).json({ status, message });
 };
+
+const uploadPhotoSchema = z.object({
+  image: z.string().min(1)
+});
+
+const ALLOWED_PHOTO_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
+
+function decodePhotoDataUrl(dataUrl) {
+  const match = /^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/.exec(dataUrl);
+  if (!match) return { error: "Formato de imagen inválido" };
+
+  const [, mimeType, base64Payload] = match;
+  if (!ALLOWED_PHOTO_MIME_TYPES.includes(mimeType)) {
+    return { error: "Tipo de imagen no permitido (usá JPEG, PNG o WEBP)" };
+  }
+
+  const buffer = Buffer.from(base64Payload, "base64");
+  if (buffer.length === 0 || buffer.length > MAX_PHOTO_BYTES) {
+    return { error: "La imagen supera el tamaño máximo permitido (4MB)" };
+  }
+
+  return { buffer, mimeType };
+}
 
 const jwtSecret = process.env.JWT_SECRET || "";
 const passwordResetTokenTtlMinutesRaw = Number(
@@ -1530,6 +1555,30 @@ app.delete("/v2/pets/:id", async (req, res) => {
   }
 });
 
+app.post("/v2/pets/:id/photo", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = uploadPhotoSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const decoded = decodePhotoDataUrl(parsed.data.image);
+  if (decoded.error) return sendError(res, 400, decoded.error);
+
+  try {
+    const photoUrl = await uploadPhoto("pets", req.params.id, decoded.buffer, decoded.mimeType);
+    const params = [photoUrl, req.params.id];
+    const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
+    const result = await pool.query(
+      `UPDATE pets SET photo_url = $1 WHERE id = $2${tenantClause} RETURNING *`,
+      params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
 app.get("/agenda", async (req, res) => {
   const date = typeof req.query.date === "string" ? req.query.date.trim() : "";
   const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
@@ -1820,6 +1869,30 @@ app.delete("/agenda/:id", async (req, res) => {
     );
     if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
     res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/agenda/:id/photo", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = uploadPhotoSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const decoded = decodePhotoDataUrl(parsed.data.image);
+  if (decoded.error) return sendError(res, 400, decoded.error);
+
+  try {
+    const photoUrl = await uploadPhoto("turnos", req.params.id, decoded.buffer, decoded.mimeType);
+    const params = [photoUrl, req.params.id];
+    const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
+    const result = await pool.query(
+      `UPDATE agenda_turnos SET photo_url = $1 WHERE id = $2${tenantClause} RETURNING *`,
+      params
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
+    res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");

@@ -9,10 +9,11 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
-    "test": "node --test",
+    "test": "node --experimental-test-module-mocks --test",
     "lint": "eslint ."
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.110.8",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
