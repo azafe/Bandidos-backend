@@ -1461,14 +1461,25 @@ app.get("/v2/pets", async (req, res) => {
   const filters = [];
   const params = [];
 
-  if (req.tenantId) { params.push(req.tenantId); filters.push(`tenant_id = $${params.length}`); }
+  if (req.tenantId) { params.push(req.tenantId); filters.push(`p.tenant_id = $${params.length}`); }
   if (query) {
     params.push(`%${query}%`);
-    filters.push(`(name ILIKE $${params.length} OR breed ILIKE $${params.length})`);
+    filters.push(`(p.name ILIKE $${params.length} OR p.breed ILIKE $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-  const sql = `SELECT * FROM pets ${whereClause} ORDER BY created_at DESC`;
+  const sql = `
+    SELECT p.*, COALESCE(sc.service_count, 0) AS customer_service_count
+    FROM pets p
+    LEFT JOIN (
+      SELECT customer_id, COUNT(*) AS service_count
+      FROM services
+      ${req.tenantId ? "WHERE tenant_id = $1" : ""}
+      GROUP BY customer_id
+    ) sc ON sc.customer_id = p.customer_id
+    ${whereClause}
+    ORDER BY customer_service_count DESC, p.created_at DESC
+  `;
 
   try {
     const result = await pool.query(sql, params);
