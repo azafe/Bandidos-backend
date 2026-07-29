@@ -182,6 +182,11 @@ const createAgendaSchema = z.object({
   traslado_amount: z.coerce.number().min(0).optional().default(0),
 });
 
+const dayNoteSchema = z.object({
+  date: dateSchema,
+  note: z.string().max(4000),
+});
+
 const createAgendaWithNewPetSchema = z.object({
   date: dateSchema,
   time: timeSchema,
@@ -1658,6 +1663,64 @@ app.get("/agenda/summary", async (req, res) => {
       params
     );
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.get("/agenda/day-note", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsedDate = dateSchema.safeParse(
+    typeof req.query.date === "string" ? req.query.date.trim() : ""
+  );
+  if (!parsedDate.success) return sendError(res, 400, "Invalid date");
+
+  try {
+    const result = await pool.query(
+      `SELECT n.note, n.updated_at, u.email AS updated_by_email
+       FROM agenda_day_notes n
+       LEFT JOIN users u ON u.id = n.updated_by
+       WHERE n.tenant_id = $1 AND n.date = $2`,
+      [req.tenantId, parsedDate.data]
+    );
+    const row = result.rows[0];
+    res.json({
+      date: parsedDate.data,
+      note: row?.note || "",
+      updated_at: row?.updated_at || null,
+      updated_by_email: row?.updated_by_email || null,
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.put("/agenda/day-note", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = dayNoteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+
+  const { date, note } = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO agenda_day_notes (tenant_id, date, note, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (tenant_id, date)
+       DO UPDATE SET note = EXCLUDED.note, updated_by = EXCLUDED.updated_by, updated_at = now()
+       RETURNING note, updated_at`,
+      [req.tenantId, date, note, req.user?.sub ?? null]
+    );
+    const row = result.rows[0];
+    res.json({
+      date,
+      note: row.note,
+      updated_at: row.updated_at,
+      updated_by_email: req.user?.email ?? null,
+    });
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
