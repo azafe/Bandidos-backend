@@ -1468,15 +1468,20 @@ app.get("/v2/pets", async (req, res) => {
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  // El historial real de servicios vive en agenda_turnos (no en la tabla "services",
+  // que está prácticamente vacía). pets.customer_id casi nunca está seteado, así que
+  // agrupamos por owner_name normalizado para contar servicios de todas las mascotas
+  // de un mismo dueño.
   const sql = `
-    SELECT p.*, COALESCE(sc.service_count, 0) AS customer_service_count
+    SELECT p.*, COALESCE(at.service_count, 0) AS customer_service_count
     FROM pets p
     LEFT JOIN (
-      SELECT customer_id, COUNT(*) AS service_count
-      FROM services
-      ${req.tenantId ? "WHERE tenant_id = $1" : ""}
-      GROUP BY customer_id
-    ) sc ON sc.customer_id = p.customer_id
+      SELECT lower(trim(owner_name)) AS owner_key, COUNT(*) AS service_count
+      FROM agenda_turnos
+      WHERE status != 'cancelled'
+      ${req.tenantId ? "AND tenant_id = $1" : ""}
+      GROUP BY lower(trim(owner_name))
+    ) at ON at.owner_key = lower(trim(p.owner_name))
     ${whereClause}
     ORDER BY customer_service_count DESC, p.created_at DESC
   `;
