@@ -1727,6 +1727,36 @@ app.put("/agenda/day-note", async (req, res) => {
   }
 });
 
+app.get("/agenda/counts", async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const parsedFrom = dateSchema.safeParse(from);
+  const parsedTo = dateSchema.safeParse(to);
+
+  if (!parsedFrom.success || !parsedTo.success) return sendError(res, 400, "Invalid date range");
+
+  const params = [parsedFrom.data, parsedTo.data];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
+  try {
+    const result = await pool.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE status = 'finished')::int AS finished,
+              COUNT(*) FILTER (WHERE status = 'reserved')::int AS reserved,
+              COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled
+       FROM agenda_turnos
+       WHERE date BETWEEN $1 AND $2${tenantClause}
+       GROUP BY date
+       ORDER BY date ASC`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
 app.post("/agenda", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createAgendaSchema.safeParse(req.body);
