@@ -116,13 +116,16 @@ const cargos = await q(`
          MIN(period)::date AS desde,
          MAX(period)::date AS hasta
     FROM fixed_expense_charges`);
+// Se cuenta por tenant: fixed_expense_periods es (tenant, período), así que
+// decir "N meses" a secas confunde cuando hay más de un tenant.
 const periodos = await q(`
-  SELECT source, COUNT(*)::int AS n FROM fixed_expense_periods
-   GROUP BY source ORDER BY source`);
+  SELECT t.name AS tenant, p.source, COUNT(*)::int AS n
+    FROM fixed_expense_periods p JOIN tenants t ON t.id = p.tenant_id
+   GROUP BY t.name, p.source ORDER BY t.name, p.source`);
 
 console.log(`\n  cargos generados: ${cargos[0].n}`);
 console.log(`  períodos         : ${fecha(cargos[0].desde)} a ${fecha(cargos[0].hasta)}`);
-for (const p of periodos) console.log(`    ${p.source}: ${p.n} meses`);
+for (const p of periodos) console.log(`    ${p.tenant}: ${p.n} meses '${p.source}'`);
 
 console.log("\nListo. Los meses marcados 'backfill' llevan los montos ACTUALES");
 console.log("aplicados hacia atrás: son estimaciones, y la pantalla lo avisa.");
