@@ -27,6 +27,18 @@ if (!TEST_URL) {
     () => {}
   );
 } else {
+  // Esta suite hace DROP SCHEMA public CASCADE. Apuntarla a una base que no
+  // sea local borraría todo, así que se niega a correr fuera de localhost.
+  // No hay bandera para saltear la verificación: es a propósito.
+  const host = new URL(TEST_URL).hostname;
+  const esLocal = ["localhost", "127.0.0.1", "::1", ""].includes(host);
+  if (!esLocal) {
+    throw new Error(
+      `TEST_DATABASE_URL apunta a "${host}". Esta suite borra el schema entero ` +
+      `y solo corre contra localhost. Usá una base local y descartable.`
+    );
+  }
+
   const TENANT = "a8351018-89bd-4c57-9289-f7862d82be32";
   const SECRET = "secreto-de-test";
 
