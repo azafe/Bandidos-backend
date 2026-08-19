@@ -10,7 +10,8 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "test": "node --experimental-test-module-mocks --test",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:integration": "node --test tests/*.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",
