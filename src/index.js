@@ -108,7 +108,10 @@ const createEmployeeSchema = z.object({
   phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
   status: statusSchema,
-  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  // Tasa real de comisión del peluquero. Reemplaza al 0.40 que estaba
+  // hardcodeado en el frontend y se aplicaba por igual a todos.
+  commission_rate: z.coerce.number().min(0).max(1).optional()
 });
 
 const updateEmployeeSchema = z.object({
@@ -117,7 +120,8 @@ const updateEmployeeSchema = z.object({
   phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
   status: statusSchema.optional(),
-  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  commission_rate: z.coerce.number().min(0).max(1).optional()
 });
 
 const createCustomerSchema = z.object({
@@ -374,7 +378,11 @@ const createFixedExpenseSchema = z.object({
   due_day: z.coerce.number().int().min(1).max(31),
   payment_method_id: z.string().uuid(),
   supplier_id: z.string().uuid().optional().nullable(),
-  status: statusSchema
+  status: statusSchema,
+  // Vigencia: desde cuándo devenga. Sin esto, un gasto cargado hoy aparecía
+  // en los números de meses en los que todavía no existía.
+  start_date: dateSchema.optional(),
+  end_date: z.preprocess(emptyStringToNull, dateSchema.nullable().optional())
 });
 
 const updateFixedExpenseSchema = z.object({
@@ -384,7 +392,9 @@ const updateFixedExpenseSchema = z.object({
   due_day: z.coerce.number().int().min(1).max(31).optional(),
   payment_method_id: z.string().uuid().optional(),
   supplier_id: z.string().uuid().optional().nullable(),
-  status: statusSchema.optional()
+  status: statusSchema.optional(),
+  start_date: dateSchema.optional(),
+  end_date: z.preprocess(emptyStringToNull, dateSchema.nullable().optional())
 });
 
 const sendError = (res, status, message) => {
@@ -529,6 +539,15 @@ const getClientIp = (req) => {
     return forwarded.split(",")[0].trim();
   }
   return req.ip || "unknown";
+};
+
+// Último día del mes en curso, en formato YYYY-MM-DD. Se calcula en cada
+// llamada a propósito: como constante de módulo quedaría congelada al arranque.
+const endOfCurrentMonth = () => {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0))
+    .toISOString()
+    .slice(0, 10);
 };
 
 const buildUpdate = (allowedFields, payload) => {
@@ -820,11 +839,6 @@ app.get("/reports/summary", async (req, res) => {
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
-  const fixedFilters = [];
-  const fixedParams = [];
-  if (req.tenantId) { fixedParams.push(req.tenantId); fixedFilters.push(`tenant_id = $${fixedParams.length}`); }
-  fixedFilters.push("status = 'active'");
-  const fixedWhere = `WHERE ${fixedFilters.join(" AND ")}`;
 
   try {
     const servicesResult = await pool.query(
@@ -837,16 +851,17 @@ app.get("/reports/summary", async (req, res) => {
        FROM daily_expenses ${whereClause}`,
       params
     );
-    const fixedResult = includeFixed
-      ? await pool.query(
-          `SELECT COALESCE(SUM(amount), 0) AS total FROM fixed_expenses ${fixedWhere}`,
-          fixedParams
-        )
-      : { rows: [{ total: 0 }] };
+    // Antes esto sumaba el total mensual de TODOS los activos, ignorando el
+    // rango: un reporte de un día cargaba un mes entero de alquiler y uno de
+    // tres meses cargaba uno solo. Ahora deriva del mismo devengado que el
+    // dashboard, así que los dos números coinciden por construcción.
+    const fixedTotal =
+      includeFixed && req.tenantId && from && to
+        ? (await getFixedExpenseAccrual(req.tenantId, from, to)).accrued_total
+        : 0;
 
     const servicesTotal = Number(servicesResult.rows[0]?.total ?? 0);
     const dailyTotal = Number(dailyResult.rows[0]?.total ?? 0);
-    const fixedTotal = Number(fixedResult.rows[0]?.total ?? 0);
 
     res.json({
       services_total: servicesTotal,
@@ -1312,13 +1327,14 @@ app.post("/v2/employees", async (req, res) => {
   const parsed = createEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { name, role, phone, email, status, notes } = parsed.data;
+  const { name, role, phone, email, status, notes, commission_rate } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id, commission_rate)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0.40))
        RETURNING *`,
-      [name, role, phone ?? null, email ?? null, status, notes ?? null, req.tenantId]
+      [name, role, phone ?? null, email ?? null, status, notes ?? null, req.tenantId,
+       commission_rate ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1333,7 +1349,10 @@ app.put("/v2/employees/:id", async (req, res) => {
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(["name", "role", "phone", "email", "status", "notes"], updates);
+  const { fields, values, idx } = buildUpdate(
+    ["name", "role", "phone", "email", "status", "notes", "commission_rate"],
+    updates
+  );
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
 
   values.push(req.params.id);
@@ -2827,7 +2846,600 @@ app.delete("/v2/daily-expenses/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
+// ─── Gastos fijos: devengamiento ────────────────────────────────────────────
+// La plantilla (fixed_expenses) define QUÉ se paga y desde cuándo. Los cargos
+// (fixed_expense_charges) son el hecho contable de CADA mes, con el monto
+// congelado al generarse. Todo total de un período se calcula desde los cargos,
+// nunca desde la plantilla — mismo criterio que supplier_movements.
+
+// due_date del mes = período + (min(día de vencimiento, días reales del mes) - 1).
+// El LEAST es lo que evita que un vencimiento 31 desaparezca en abril o febrero.
+const dueDateSql = (periodExpr, dayExpr) => `(
+  ${periodExpr}
+  + (LEAST(
+       ${dayExpr},
+       EXTRACT(DAY FROM (${periodExpr} + INTERVAL '1 month' - INTERVAL '1 day'))::int
+     ) - 1) * INTERVAL '1 day'
+)::date`;
+
+// "2026-09" -> "2026-09-01". El mes es la unidad, el día siempre es el 1.
+const periodSchema = z.string().regex(/^\d{4}-\d{2}$/);
+const periodToDate = (period) => `${period}-01`;
+
+// Los meses YA NO se materializan solos. El admin arma cada mes explícitamente
+// (copiando el anterior), así que un mes sin lista es un dato real, no un hueco
+// a rellenar. Esto devuelve qué meses del rango están sin armar para que el
+// dashboard pueda avisar en vez de mostrar $0 y hacer creer que no hay costos.
+async function findUnarmedPeriods(tenantId, from, to) {
+  const result = await pool.query(
+    `SELECT m.period::date AS period
+       FROM generate_series(
+              date_trunc('month', $2::timestamp),
+              date_trunc('month', $3::timestamp),
+              INTERVAL '1 month'
+            ) AS m(period)
+      WHERE NOT EXISTS (
+              SELECT 1 FROM fixed_expense_periods p
+               WHERE p.tenant_id = $1 AND p.period = m.period::date
+            )
+      ORDER BY m.period`,
+    [tenantId, from, to]
+  );
+  return result.rows.map((row) => toDateKey(row.period));
+}
+
+// Devuelve los cargos que tocan el rango, con los días del mes que caen dentro
+// de él. El prorrateo se hace sobre eso: un rango de 1 día imputa 1/30 del
+// alquiler, uno de 3 meses imputa 3 alquileres.
+async function fetchChargesForRange(tenantId, from, to) {
+  const result = await pool.query(
+    `SELECT
+       c.id,
+       c.fixed_expense_id,
+       c.period,
+       c.due_date,
+       c.amount,
+       c.paid_at,
+       c.paid_amount,
+       c.name,
+       c.category_id,
+       cat.name AS category_name,
+       EXTRACT(DAY FROM (c.period + INTERVAL '1 month' - INTERVAL '1 day'))::int
+         AS days_in_month,
+       GREATEST(0,
+         (LEAST((c.period + INTERVAL '1 month' - INTERVAL '1 day')::date, $3::date)
+          - GREATEST(c.period, $2::date)) + 1
+       ) AS days_in_range
+     FROM fixed_expense_charges c
+     LEFT JOIN expense_categories cat ON cat.id = c.category_id
+     WHERE c.tenant_id = $1
+       AND c.period <= $3::date
+       AND (c.period + INTERVAL '1 month' - INTERVAL '1 day')::date >= $2::date
+     ORDER BY c.due_date, c.name`,
+    [tenantId, from, to]
+  );
+  return result.rows;
+}
+
+function eachDate(from, to) {
+  const days = [];
+  const cursor = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  while (cursor <= end) {
+    days.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return days;
+}
+
+function toDateKey(value) {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
+
+// Devengado del rango + desgloses. `accrued_total` es exactamente la suma de
+// `by_day`, así que el KPI y el gráfico diario ya no pueden discrepar.
+function buildAccrual(charges, from, to) {
+  const days = eachDate(from, to);
+  const perDay = new Map(days.map((day) => [day, 0]));
+  const byCategory = new Map();
+  const byExpense = new Map();
+  let accruedTotal = 0;
+  let unpaidTotal = 0;
+  let unpaidCount = 0;
+
+  for (const charge of charges) {
+    const amount = Number(charge.amount) || 0;
+    const daysInMonth = Number(charge.days_in_month) || 1;
+    const periodKey = toDateKey(charge.period);
+    const chargeDays = days.filter((day) => day.slice(0, 7) === periodKey.slice(0, 7));
+    if (chargeDays.length === 0) continue;
+
+    // Se reparten centavos enteros con resto mayor en vez de redondear cada día
+    // por separado: así la suma de by_day da EXACTAMENTE accrued_total y el
+    // gráfico diario nunca discrepa del KPI, que es el punto de todo esto.
+    const totalCents = Math.round((amount * chargeDays.length * 100) / daysInMonth);
+    const baseCents = Math.floor(totalCents / chargeDays.length);
+    let remainder = totalCents - baseCents * chargeDays.length;
+    for (const day of chargeDays) {
+      const cents = baseCents + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder -= 1;
+      perDay.set(day, perDay.get(day) + cents / 100);
+    }
+
+    const accrued = totalCents / 100;
+    accruedTotal += accrued;
+
+    const catKey = charge.category_id || "sin-categoria";
+    const cat = byCategory.get(catKey) || {
+      category_id: charge.category_id || null,
+      name: charge.category_name || "Sin categoría",
+      accrued: 0
+    };
+    cat.accrued += accrued;
+    byCategory.set(catKey, cat);
+
+    const exp = byExpense.get(charge.fixed_expense_id) || {
+      fixed_expense_id: charge.fixed_expense_id,
+      name: charge.name,
+      accrued: 0,
+      monthly_amount: amount
+    };
+    exp.accrued += accrued;
+    exp.monthly_amount = amount;
+    byExpense.set(charge.fixed_expense_id, exp);
+
+    if (!charge.paid_at) {
+      unpaidTotal += amount;
+      unpaidCount += 1;
+    }
+  }
+
+  // Run-rate: lo que cuesta un mes completo al final del rango. Es el número
+  // que muestra la página de Gastos Fijos, y NO el devengado del período.
+  const lastPeriod = charges.reduce((latest, charge) => {
+    const key = toDateKey(charge.period);
+    return key > latest ? key : latest;
+  }, "");
+  const monthlyTotal = charges
+    .filter((charge) => toDateKey(charge.period) === lastPeriod)
+    .reduce((sum, charge) => sum + (Number(charge.amount) || 0), 0);
+
+  return {
+    from,
+    to,
+    accrued_total: Number(accruedTotal.toFixed(2)),
+    monthly_total: Number(monthlyTotal.toFixed(2)),
+    by_category: Array.from(byCategory.values())
+      .map((cat) => ({ ...cat, accrued: Number(cat.accrued.toFixed(2)) }))
+      .sort((a, b) => b.accrued - a.accrued),
+    by_expense: Array.from(byExpense.values())
+      .map((exp) => ({ ...exp, accrued: Number(exp.accrued.toFixed(2)) }))
+      .sort((a, b) => b.accrued - a.accrued),
+    by_day: days.map((day) => ({
+      date: day,
+      amount: Number(((perDay.get(day) || 0) * 100).toFixed(0)) / 100
+    })),
+    unpaid: { count: unpaidCount, total: Number(unpaidTotal.toFixed(2)) },
+    charges: charges.map((charge) => ({
+      id: charge.id,
+      fixed_expense_id: charge.fixed_expense_id,
+      name: charge.name,
+      period: toDateKey(charge.period),
+      due_date: toDateKey(charge.due_date),
+      amount: Number(charge.amount),
+      paid_at: charge.paid_at ? toDateKey(charge.paid_at) : null,
+      paid_amount: charge.paid_amount === null ? null : Number(charge.paid_amount)
+    }))
+  };
+}
+
+// Fuente única de verdad del devengado. Tanto el dashboard como /reports/summary
+// consumen esto en vez de recalcular cada uno por su lado.
+async function getFixedExpenseAccrual(tenantId, from, to) {
+  const [charges, unarmedPeriods] = await Promise.all([
+    fetchChargesForRange(tenantId, from, to),
+    findUnarmedPeriods(tenantId, from, to)
+  ]);
+  return { ...buildAccrual(charges, from, to), unarmed_periods: unarmedPeriods };
+}
+
+// ─── Gastos fijos: el mes como unidad editable ──────────────────────────────
+// Cada mes es una lista propia. Se arma copiando el mes anterior y a partir de
+// ahí se edita libre: nombre, monto, categoría, quitar ítems. Editar un mes no
+// toca ningún otro, que es lo que permite corregir abril sin mover mayo.
+
+const CHARGE_ITEM_COLUMNS = `
+  c.id, c.fixed_expense_id, c.period, c.due_date, c.due_day, c.amount, c.name,
+  c.category_id, c.payment_method_id, c.supplier_id,
+  c.paid_at, c.paid_amount, c.created_at, c.updated_at,
+  (c.updated_at > c.created_at) AS edited`;
+
+async function fetchMonth(tenantId, periodDate) {
+  const [armed, items] = await Promise.all([
+    pool.query(
+      `SELECT period, source, created_at FROM fixed_expense_periods
+        WHERE tenant_id = $1 AND period = $2::date`,
+      [tenantId, periodDate]
+    ),
+    pool.query(
+      `SELECT ${CHARGE_ITEM_COLUMNS},
+              cat.name AS category_name,
+              pm.name  AS payment_method_name,
+              sup.name AS supplier_name
+         FROM fixed_expense_charges c
+         LEFT JOIN expense_categories cat ON cat.id = c.category_id
+         LEFT JOIN payment_methods    pm  ON pm.id  = c.payment_method_id
+         LEFT JOIN suppliers          sup ON sup.id = c.supplier_id
+        WHERE c.tenant_id = $1 AND c.period = $2::date
+        ORDER BY c.due_date, c.name`,
+      [tenantId, periodDate]
+    )
+  ]);
+
+  const rows = items.rows.map((row) => ({
+    ...row,
+    period: toDateKey(row.period),
+    due_date: toDateKey(row.due_date),
+    amount: Number(row.amount),
+    paid_at: row.paid_at ? toDateKey(row.paid_at) : null,
+    paid_amount: row.paid_amount === null ? null : Number(row.paid_amount)
+  }));
+
+  const total = rows.reduce((sum, row) => sum + row.amount, 0);
+  const unpaid = rows.filter((row) => !row.paid_at);
+
+  return {
+    period: toDateKey(periodDate),
+    // Un mes sin armar NO es un mes de $0: es un mes del que no sabemos nada.
+    armed: armed.rowCount > 0,
+    source: armed.rows[0]?.source ?? null,
+    items: rows,
+    total: Number(total.toFixed(2)),
+    unpaid: {
+      count: unpaid.length,
+      total: Number(unpaid.reduce((sum, row) => sum + row.amount, 0).toFixed(2))
+    }
+  };
+}
+
+const previousPeriodDate = (periodDate) => {
+  const d = new Date(`${periodDate}T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 10);
+};
+
+app.get("/v2/fixed-expenses/months/:period", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = periodSchema.safeParse(req.params.period);
+  if (!parsed.success) return sendError(res, 400, "Período inválido (YYYY-MM)");
+
+  const periodDate = periodToDate(parsed.data);
+  try {
+    const month = await fetchMonth(req.tenantId, periodDate);
+    // Para ofrecer "Copiar los N de agosto" hay que saber qué hay en el mes
+    // anterior sin que el front tenga que pedirlo aparte.
+    const prev = previousPeriodDate(periodDate);
+    const prevCount = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM fixed_expense_charges
+        WHERE tenant_id = $1 AND period = $2::date`,
+      [req.tenantId, prev]
+    );
+    res.json({
+      ...month,
+      previous_period: prev.slice(0, 7),
+      previous_item_count: prevCount.rows[0]?.n ?? 0
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+const copyMonthSchema = z.object({ from: periodSchema.optional() });
+
+// Arma un mes copiando otro. Si el mes de origen no tiene nada, siembra desde
+// las plantillas vigentes — el caso del primer mes, cuando no hay anterior.
+app.post("/v2/fixed-expenses/months/:period/copy", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsedPeriod = periodSchema.safeParse(req.params.period);
+  if (!parsedPeriod.success) return sendError(res, 400, "Período inválido (YYYY-MM)");
+  const parsedBody = copyMonthSchema.safeParse(req.body ?? {});
+  if (!parsedBody.success) return sendError(res, 400, "Invalid request body");
+
+  const periodDate = periodToDate(parsedPeriod.data);
+  const sourceDate = parsedBody.data.from
+    ? periodToDate(parsedBody.data.from)
+    : previousPeriodDate(periodDate);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const already = await client.query(
+      `SELECT 1 FROM fixed_expense_periods WHERE tenant_id = $1 AND period = $2::date`,
+      [req.tenantId, periodDate]
+    );
+    if (already.rowCount > 0) {
+      await client.query("ROLLBACK");
+      return sendError(
+        res,
+        409,
+        "Ese mes ya está armado. Editá los ítems en vez de volver a copiarlo."
+      );
+    }
+
+    const copied = await client.query(
+      `INSERT INTO fixed_expense_charges
+         (fixed_expense_id, tenant_id, period, due_date, due_day, amount, name,
+          category_id, payment_method_id, supplier_id)
+       SELECT src.fixed_expense_id, src.tenant_id, $2::date,
+              ${dueDateSql("$2::date", "src.due_day")}, src.due_day,
+              src.amount, src.name, src.category_id, src.payment_method_id, src.supplier_id
+         FROM fixed_expense_charges src
+         -- La copia sale del mes anterior, pero la vigencia vive en la
+         -- plantilla. Sin este filtro, "Dar de baja" no daba de baja nada: el
+         -- ítem se seguía copiando mes a mes para siempre.
+         LEFT JOIN fixed_expenses fe ON fe.id = src.fixed_expense_id
+        WHERE src.tenant_id = $1
+          AND src.period = $3::date
+          -- Un ítem suelto (sin plantilla) no tiene vigencia: se copia siempre,
+          -- y para cortarlo alcanza con quitarlo del mes que no lo lleva.
+          AND (fe.id IS NULL OR fe.end_date IS NULL OR fe.end_date >= $2::date)`,
+      [req.tenantId, periodDate, sourceDate]
+    );
+
+    let source = "copy";
+    if (copied.rowCount === 0) {
+      // Sin mes anterior: se siembra desde las plantillas vigentes en ese mes.
+      await client.query(
+        `INSERT INTO fixed_expense_charges
+           (fixed_expense_id, tenant_id, period, due_date, due_day, amount, name,
+            category_id, payment_method_id, supplier_id)
+         SELECT fe.id, fe.tenant_id, $2::date,
+                ${dueDateSql("$2::date", "fe.due_day")}, fe.due_day,
+                fe.amount, fe.name, fe.category_id, fe.payment_method_id, fe.supplier_id
+           FROM fixed_expenses fe
+          WHERE fe.tenant_id = $1
+            AND fe.status = 'active'
+            AND date_trunc('month', fe.start_date)::date <= $2::date
+            AND (fe.end_date IS NULL OR fe.end_date >= $2::date)`,
+        [req.tenantId, periodDate]
+      );
+      source = "seed";
+    }
+
+    await client.query(
+      `INSERT INTO fixed_expense_periods (tenant_id, period, source)
+       VALUES ($1, $2::date, $3)`,
+      [req.tenantId, periodDate, source]
+    );
+
+    await client.query("COMMIT");
+    res.status(201).json(await fetchMonth(req.tenantId, periodDate));
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+});
+
+const createMonthItemSchema = z.object({
+  name: z.string().min(1),
+  amount: z.coerce.number().min(0),
+  due_day: z.coerce.number().int().min(1).max(31),
+  category_id: z.string().uuid(),
+  payment_method_id: z.string().uuid(),
+  supplier_id: z.preprocess(emptyStringToNull, z.string().uuid().nullable().optional()),
+  // Vincular con una plantilla es opcional: un mes puede tener un gasto suelto.
+  fixed_expense_id: z.preprocess(emptyStringToNull, z.string().uuid().nullable().optional())
+});
+
+// Agrega un ítem a un mes. Arma el mes si todavía no lo estaba, así cargar el
+// primer gasto a mano cuenta como armarlo.
+app.post("/v2/fixed-expenses/months/:period/items", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsedPeriod = periodSchema.safeParse(req.params.period);
+  if (!parsedPeriod.success) return sendError(res, 400, "Período inválido (YYYY-MM)");
+  const parsed = createMonthItemSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const periodDate = periodToDate(parsedPeriod.data);
+  const d = parsed.data;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO fixed_expense_periods (tenant_id, period, source)
+       VALUES ($1, $2::date, 'manual')
+       ON CONFLICT (tenant_id, period) DO NOTHING`,
+      [req.tenantId, periodDate]
+    );
+    const result = await client.query(
+      `INSERT INTO fixed_expense_charges
+         (fixed_expense_id, tenant_id, period, due_date, due_day, amount, name,
+          category_id, payment_method_id, supplier_id)
+       VALUES ($1, $2, $3::date, ${dueDateSql("$3::date", "$4::int")}, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        d.fixed_expense_id ?? null,
+        req.tenantId,
+        periodDate,
+        d.due_day,
+        d.amount,
+        d.name.trim(),
+        d.category_id,
+        d.payment_method_id,
+        d.supplier_id ?? null
+      ]
+    );
+    await client.query("COMMIT");
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+});
+
+// Quita un ítem de UN mes. No da de baja el gasto: los demás meses siguen igual.
+app.delete("/v2/fixed-expenses/charges/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `DELETE FROM fixed_expense_charges WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Charge not found");
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// OJO: debe registrarse ANTES de /v2/fixed-expenses/:id, si no Express matchea
+// "accrual" como un :id.
+app.get("/v2/fixed-expenses/accrual", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
+  const parsedFrom = dateSchema.safeParse(
+    typeof req.query.from === "string" ? req.query.from.trim() : ""
+  );
+  const parsedTo = dateSchema.safeParse(
+    typeof req.query.to === "string" ? req.query.to.trim() : ""
+  );
+  if (!parsedFrom.success || !parsedTo.success) {
+    return sendError(res, 400, "from y to son obligatorios (YYYY-MM-DD)");
+  }
+  if (parsedFrom.data > parsedTo.data) {
+    return sendError(res, 400, "from no puede ser posterior a to");
+  }
+
+  try {
+    res.json(await getFixedExpenseAccrual(req.tenantId, parsedFrom.data, parsedTo.data));
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+const updateFixedExpenseChargeSchema = z.object({
+  // Edición de UN mes. Es deliberadamente lo único que puede reescribir un mes
+  // cerrado: la plantilla nunca toca el pasado sola, y editar un mes no se
+  // propaga a los demás.
+  amount: z.coerce.number().min(0).optional(),
+  name: z.string().min(1).optional(),
+  due_day: z.coerce.number().int().min(1).max(31).optional(),
+  category_id: z.string().uuid().optional(),
+  payment_method_id: z.string().uuid().optional(),
+  supplier_id: z.preprocess(emptyStringToNull, z.string().uuid().nullable().optional()),
+  paid_at: z.preprocess(emptyStringToNull, dateSchema.nullable().optional()),
+  paid_amount: z.preprocess(
+    (v) => (v === "" || v === undefined ? null : v),
+    z.coerce.number().min(0).nullable().optional()
+  )
+});
+
+// Corrige el devengado de un mes puntual y/o marca el cargo como pagado.
+//
+// Es una actualización PARCIAL a propósito: mandar solo `amount` no debe tocar
+// el estado de pago, y mandar solo `paid_at` no debe tocar el monto. La
+// presencia de la clave en el body es lo que decide, así que `paid_at: null`
+// (revertir un pago) se distingue de no mandar `paid_at`.
+//
+// Dos segmentos después del recurso, así que no colisiona con /:id.
+app.put("/v2/fixed-expenses/charges/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
+  const parsed = updateFixedExpenseChargeSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const { amount, paid_at, paid_amount, due_day } = parsed.data;
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const touchesPayment = Object.prototype.hasOwnProperty.call(body, "paid_at");
+
+  const fields = [];
+  const values = [];
+
+  // Si en la misma llamada se corrige el monto, el pago implícito usa el monto
+  // NUEVO: en un UPDATE, la columna `amount` todavía tendría el valor viejo.
+  let effectiveAmountSql = "amount";
+  if (amount !== undefined) {
+    values.push(amount);
+    fields.push(`amount = $${values.length}`);
+    effectiveAmountSql = `$${values.length}::numeric`;
+  }
+
+  for (const field of ["name", "category_id", "payment_method_id", "supplier_id"]) {
+    if (parsed.data[field] !== undefined) {
+      values.push(parsed.data[field]);
+      fields.push(`${field} = $${values.length}`);
+    }
+  }
+
+  // El día de vencimiento se reclampa contra el mes de ESTE cargo, así que un
+  // 31 en un mes de 30 cae el 30 en vez de perderse.
+  if (due_day !== undefined) {
+    values.push(due_day);
+    fields.push(`due_day = $${values.length}`);
+    fields.push(`due_date = ${dueDateSql("c.period", `$${values.length}::int`)}`);
+  }
+
+  if (fields.length === 0 && !touchesPayment) {
+    return sendError(res, 400, "No fields to update");
+  }
+
+  if (touchesPayment) {
+    values.push(paid_at ?? null);
+    const paidAtIdx = values.length;
+    values.push(paid_amount ?? null);
+    const paidAmountIdx = values.length;
+    fields.push(`paid_at = $${paidAtIdx}::date`);
+    // Sin monto de pago explícito se asume que se pagó lo devengado.
+    fields.push(
+      `paid_amount = CASE WHEN $${paidAtIdx}::date IS NULL THEN NULL
+                          ELSE COALESCE($${paidAmountIdx}::numeric, ${effectiveAmountSql}) END`
+    );
+  }
+
+  fields.push("updated_at = now()");
+  values.push(req.params.id);
+  const idIdx = values.length;
+  values.push(req.tenantId);
+
+  try {
+    const result = await pool.query(
+      `UPDATE fixed_expense_charges c
+          SET ${fields.join(", ")}
+        WHERE c.id = $${idIdx} AND c.tenant_id = $${values.length}
+        RETURNING c.*`,
+      values
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Charge not found");
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
 app.get("/v2/fixed-expenses", async (req, res) => {
+  // Este endpoint devuelve PLANTILLAS, que no tienen fecha. Antes aceptaba
+  // from/to y los descartaba sin avisar, así que el frontend creía estar
+  // filtrando por período. Para totales de un rango va /v2/fixed-expenses/accrual.
+  if (req.query.from !== undefined || req.query.to !== undefined) {
+    return sendError(
+      res,
+      400,
+      "Los gastos fijos son plantillas sin fecha. Para el total de un período usá /v2/fixed-expenses/accrual?from&to"
+    );
+  }
+
   const categoryId =
     typeof req.query.category_id === "string" ? req.query.category_id.trim() : "";
   const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
@@ -2894,14 +3506,18 @@ app.post("/v2/fixed-expenses", async (req, res) => {
     due_day,
     payment_method_id,
     supplier_id,
-    status
+    status,
+    start_date,
+    end_date
   } = parsed.data;
 
   try {
     const result = await pool.query(
       `INSERT INTO fixed_expenses
-        (name, category_id, amount, due_day, payment_method_id, supplier_id, status, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (name, category_id, amount, due_day, payment_method_id, supplier_id, status,
+         tenant_id, start_date, end_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+               COALESCE($9::date, date_trunc('month', CURRENT_DATE)::date), $10)
        RETURNING *`,
       [
         name,
@@ -2911,7 +3527,9 @@ app.post("/v2/fixed-expenses", async (req, res) => {
         payment_method_id,
         supplier_id ?? null,
         status,
-        req.tenantId
+        req.tenantId,
+        start_date ?? null,
+        end_date ?? null
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -2929,7 +3547,18 @@ app.put("/v2/fixed-expenses/:id", async (req, res) => {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const updates = parsed.data;
+  const updates = { ...parsed.data };
+
+  // `status` sigue siendo el control que usa la UI, pero quien manda sobre el
+  // devengamiento es la vigencia. Dar de baja cierra la vigencia a fin del mes
+  // en curso (el mes ya devengado se debe igual); reactivar la reabre.
+  if (updates.status === "inactive" && updates.end_date === undefined) {
+    updates.end_date = endOfCurrentMonth();
+  }
+  if (updates.status === "active" && updates.end_date === undefined) {
+    updates.end_date = null;
+  }
+
   const { fields, values, idx } = buildUpdate(
     [
       "name",
@@ -2938,7 +3567,9 @@ app.put("/v2/fixed-expenses/:id", async (req, res) => {
       "due_day",
       "payment_method_id",
       "supplier_id",
-      "status"
+      "status",
+      "start_date",
+      "end_date"
     ],
     updates
   );
@@ -2947,6 +3578,7 @@ app.put("/v2/fixed-expenses/:id", async (req, res) => {
     return sendError(res, 400, "No fields to update");
   }
 
+  fields.push("updated_at = now()");
   values.push(req.params.id);
   const tenantClause = req.tenantId ? ` AND tenant_id = $${values.push(req.tenantId)}` : "";
 
@@ -2960,6 +3592,30 @@ app.put("/v2/fixed-expenses/:id", async (req, res) => {
 
     if (result.rowCount === 0) {
       return sendError(res, 404, "Fixed expense not found");
+    }
+
+    // El mes en curso es un período abierto: si cambia el monto o el día de
+    // vencimiento, su cargo se actualiza. Los meses cerrados quedan congelados
+    // — que es justamente lo que impide que la historia se reescriba sola.
+    if (updates.amount !== undefined || updates.due_day !== undefined) {
+      await pool.query(
+        `UPDATE fixed_expense_charges c
+            SET amount   = f.amount,
+                due_date = (
+                  c.period
+                  + (LEAST(
+                       f.due_day,
+                       EXTRACT(DAY FROM (c.period + INTERVAL '1 month' - INTERVAL '1 day'))::int
+                     ) - 1) * INTERVAL '1 day'
+                )::date
+           FROM fixed_expenses f
+          WHERE f.id = c.fixed_expense_id
+            AND c.fixed_expense_id = $1
+            AND c.tenant_id = $2
+            AND c.period = date_trunc('month', CURRENT_DATE)::date
+            AND c.paid_at IS NULL`,
+        [req.params.id, req.tenantId]
+      );
     }
 
     res.json(result.rows[0]);
@@ -2983,6 +3639,15 @@ app.delete("/v2/fixed-expenses/:id", async (req, res) => {
     }
     res.json({ ok: true });
   } catch (err) {
+    // FK RESTRICT desde fixed_expense_charges: borrar la plantilla huerfanaría
+    // meses ya devengados y cambiaría reportes cerrados. Se da de baja, no se borra.
+    if (err && err.code === "23503") {
+      return sendError(
+        res,
+        409,
+        "Este gasto ya tiene meses devengados. Marcalo como inactivo en vez de eliminarlo para no alterar reportes pasados."
+      );
+    }
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }
