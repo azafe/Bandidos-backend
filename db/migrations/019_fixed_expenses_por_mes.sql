@@ -72,10 +72,12 @@ CREATE TABLE IF NOT EXISTS fixed_expense_periods (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id  uuid NOT NULL REFERENCES tenants(id),
   period     date NOT NULL,
-  -- De dónde salió la lista: copia del mes anterior, siembra desde plantillas,
-  -- o armado a mano.
+  -- De dónde salió la lista. 'backfill' es el caso delicado: son los meses que
+  -- esta migración completó con el monto ACTUAL de cada gasto, porque el modelo
+  -- viejo nunca guardó el histórico. Son estimaciones, no lo que se pagó, y la
+  -- pantalla tiene que decirlo.
   source     text NOT NULL DEFAULT 'manual'
-             CHECK (source IN ('copy', 'seed', 'manual')),
+             CHECK (source IN ('copy', 'seed', 'manual', 'backfill')),
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, period)
 );
@@ -84,9 +86,10 @@ CREATE INDEX IF NOT EXISTS idx_fep_tenant_period
   ON fixed_expense_periods(tenant_id, period);
 
 -- Todo mes que ya tiene cargos (los que generó el backfill de la 018) cuenta
--- como armado.
+-- como armado, pero marcado como 'backfill': sus montos son los actuales
+-- aplicados hacia atrás, no los que se pagaron en su momento.
 INSERT INTO fixed_expense_periods (tenant_id, period, source)
-SELECT DISTINCT c.tenant_id, c.period, 'seed'
+SELECT DISTINCT c.tenant_id, c.period, 'backfill'
   FROM fixed_expense_charges c
 ON CONFLICT (tenant_id, period) DO NOTHING;
 
