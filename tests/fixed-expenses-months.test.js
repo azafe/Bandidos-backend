@@ -323,9 +323,18 @@ if (!TEST_URL) {
   });
 
   // ── Integridad ────────────────────────────────────────────────────────────
-  test("las plantillas rechazan from/to en vez de ignorarlos", async () => {
-    const { status } = await api("/v2/fixed-expenses?from=2026-08-01&to=2026-08-31");
-    assert.equal(status, 400);
+  // Un cliente viejo en caché (PWA) sigue mandando from/to. Tiene que seguir
+  // funcionando: rechazarlo le rompía el dashboard entero.
+  test("las plantillas toleran from/to de clientes viejos", async () => {
+    await limpiar();
+    await api("/v2/fixed-expenses", {
+      method: "POST",
+      body: { name: "Alquiler", category_id: categoriaId, amount: 180000,
+              due_day: 1, payment_method_id: metodoId, status: "active" }
+    });
+    const { status, body } = await api("/v2/fixed-expenses?from=2026-08-01&to=2026-08-31");
+    assert.equal(status, 200);
+    assert.equal(body.length, 1, "los parámetros se ignoran, no filtran ni rompen");
   });
 
   test("no se puede borrar una plantilla con meses devengados", async () => {

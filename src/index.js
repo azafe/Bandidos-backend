@@ -3302,16 +3302,12 @@ app.put("/v2/fixed-expenses/charges/:id", async (req, res) => {
 });
 
 app.get("/v2/fixed-expenses", async (req, res) => {
-  // Este endpoint devuelve PLANTILLAS, que no tienen fecha. Antes aceptaba
-  // from/to y los descartaba sin avisar, así que el frontend creía estar
-  // filtrando por período. Para totales de un rango va /v2/fixed-expenses/accrual.
-  if (req.query.from !== undefined || req.query.to !== undefined) {
-    return sendError(
-      res,
-      400,
-      "Los gastos fijos son plantillas sin fecha. Para el total de un período usá /v2/fixed-expenses/accrual?from&to"
-    );
-  }
+  // Este endpoint devuelve PLANTILLAS, que no tienen fecha, así que from/to no
+  // aplican. Se ignoran en vez de rechazarse: el frontend es una PWA y los
+  // clientes con el bundle viejo en caché siguen mandándolos. Devolver 400 les
+  // rompía el dashboard entero hasta que el service worker se actualizara —
+  // acoplar la versión del backend a la del cliente no vale la pena por un
+  // parámetro de más. Para el total de un período está /v2/fixed-expenses/accrual.
 
   const categoryId =
     typeof req.query.category_id === "string" ? req.query.category_id.trim() : "";
