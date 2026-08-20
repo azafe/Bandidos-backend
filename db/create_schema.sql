@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS pets (
   age text,
   address text,
   birth_date date,
+  archived_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS petshop_sales (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   date date NOT NULL,
   customer_id uuid REFERENCES customers(id) ON DELETE SET NULL,
+  stylist_id uuid REFERENCES employees(id) ON DELETE SET NULL,
   payment_method_id uuid NOT NULL REFERENCES payment_methods(id) ON DELETE RESTRICT,
   notes text,
   total numeric(12,2) NOT NULL DEFAULT 0,
@@ -209,6 +211,8 @@ CREATE INDEX IF NOT EXISTS idx_agenda_turnos_date ON agenda_turnos(date);
 CREATE INDEX IF NOT EXISTS idx_agenda_turnos_date_time ON agenda_turnos(date, time);
 CREATE INDEX IF NOT EXISTS idx_petshop_products_supplier_id ON petshop_products(supplier_id);
 CREATE INDEX IF NOT EXISTS idx_petshop_sales_date ON petshop_sales(date);
+CREATE INDEX IF NOT EXISTS idx_petshop_sales_stylist_id ON petshop_sales(stylist_id);
+CREATE INDEX IF NOT EXISTS idx_pets_archived_at ON pets(archived_at);
 CREATE INDEX IF NOT EXISTS idx_petshop_sale_items_sale_id ON petshop_sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_petshop_sale_items_product_id ON petshop_sale_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_petshop_stock_movements_date ON petshop_stock_movements(date);

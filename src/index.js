@@ -280,6 +280,28 @@ const createPetshopSaleSchema = z.object({
     .min(1)
 });
 
+// Todo opcional: la pantalla de edición manda solo lo que cambió, y un campo
+// ausente tiene que quedar como estaba (mandar customer_id vacío no puede
+// borrar el cliente de la venta).
+const updatePetshopSaleSchema = z.object({
+  date: dateSchema.optional(),
+  customer_id: z.string().uuid().optional().nullable(),
+  stylist_id: z.string().uuid().optional().nullable(),
+  payment_method_id: z.string().uuid().optional(),
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  total: z.coerce.number().min(0).optional(),
+  items: z
+    .array(
+      z.object({
+        product_id: z.string().uuid(),
+        quantity: z.coerce.number().int().min(1),
+        unit_price: z.coerce.number().min(0)
+      })
+    )
+    .min(1)
+    .optional()
+});
+
 const stockMovementTypeSchema = z.enum(["in", "out", "adjust"]);
 
 const createPetshopStockMovementSchema = z.object({
@@ -839,12 +861,28 @@ app.get("/reports/summary", async (req, res) => {
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  // Misma condición pero calificada, para poder unir con employees sin que
+  // tenant_id quede ambiguo.
+  const servicesWhereClause = filters.length
+    ? `WHERE ${filters.map((f) => `s.${f}`).join(" AND ")}`
+    : "";
 
 
   try {
     const servicesResult = await pool.query(
       `SELECT COALESCE(SUM(price), 0) AS total
        FROM services ${whereClause}`,
+      params
+    );
+    // La comisión del groomer es un costo del período: si no se resta acá, el
+    // net_total muestra como ganancia plata que ya está comprometida. La tasa
+    // se guarda como fracción (0.40 = 40%); sin groomer asignado se usa la
+    // misma tasa por defecto que el resto de la app.
+    const commissionsResult = await pool.query(
+      `SELECT COALESCE(SUM(s.price * COALESCE(e.commission_rate, 0.40)), 0) AS total
+       FROM services s
+       LEFT JOIN employees e ON e.id = s.groomer_id
+       ${servicesWhereClause}`,
       params
     );
     const dailyResult = await pool.query(
@@ -863,12 +901,14 @@ app.get("/reports/summary", async (req, res) => {
 
     const servicesTotal = Number(servicesResult.rows[0]?.total ?? 0);
     const dailyTotal = Number(dailyResult.rows[0]?.total ?? 0);
+    const commissionsTotal = Number(commissionsResult.rows[0]?.total ?? 0);
 
     res.json({
       services_total: servicesTotal,
       daily_expenses_total: dailyTotal,
       fixed_expenses_total: fixedTotal,
-      net_total: servicesTotal - dailyTotal - fixedTotal
+      groomer_commissions_total: commissionsTotal,
+      net_total: servicesTotal - dailyTotal - fixedTotal - commissionsTotal
     });
   } catch (err) {
     console.error(err);
@@ -1483,6 +1523,15 @@ app.delete("/v2/customers/:id", async (req, res) => {
 
 app.get("/v2/pets", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  // Las archivadas quedan fuera salvo que se pidan explícitamente: la ficha
+  // sigue existiendo (el historial la necesita), pero no ensucia las listas.
+  const archivedParam =
+    typeof req.query.archived === "string" ? req.query.archived.trim() : "";
+  const archivedFilter = ["only", "true", "1"].includes(archivedParam)
+    ? "only"
+    : ["all", "include"].includes(archivedParam)
+    ? "all"
+    : "active";
   const filters = [];
   const params = [];
 
@@ -1491,6 +1540,8 @@ app.get("/v2/pets", async (req, res) => {
     params.push(`%${query}%`);
     filters.push(`(p.name ILIKE $${params.length} OR p.breed ILIKE $${params.length})`);
   }
+  if (archivedFilter === "active") filters.push("p.archived_at IS NULL");
+  if (archivedFilter === "only") filters.push("p.archived_at IS NOT NULL");
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   // El historial real de servicios vive en agenda_turnos (no en la tabla "services",
@@ -1589,6 +1640,52 @@ app.delete("/v2/pets/:id", async (req, res) => {
     const result = await pool.query(`DELETE FROM pets WHERE id = $1${tenantClause}`, params);
     if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
     res.json({ ok: true });
+  } catch (err) {
+    // services.pet_id es ON DELETE RESTRICT: si la mascota tiene servicios
+    // cargados, Postgres corta el borrado. Antes eso llegaba a la pantalla como
+    // "Unexpected error" y parecía que la app estaba rota.
+    if (err?.code === "23503") {
+      return sendError(
+        res,
+        409,
+        "No se puede eliminar: la mascota tiene servicios registrados. Archivala para sacarla de las listas sin perder el historial."
+      );
+    }
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Archivar es el reemplazo del borrado para una mascota con historial: la saca
+// de circulación sin tocar los turnos ni la facturación de meses ya cerrados.
+app.post("/v2/pets/:id/archive", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `UPDATE pets SET archived_at = now()
+       WHERE id = $1 AND tenant_id = $2
+       RETURNING *`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/v2/pets/:id/unarchive", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `UPDATE pets SET archived_at = NULL
+       WHERE id = $1 AND tenant_id = $2
+       RETURNING *`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
+    res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -2305,6 +2402,218 @@ app.post("/v2/petshop/sales", async (req, res) => {
 
     await client.query("COMMIT");
     res.status(201).json({ ...sale, items: saleItems });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+});
+
+// Lee los ítems de una venta y devuelve, por producto, cuántas unidades tiene
+// comprometidas. Se usa para devolver stock al editar o borrar.
+async function loadSaleItems(client, saleId) {
+  const result = await client.query(
+    `SELECT product_id, quantity, unit_price
+     FROM petshop_sale_items
+     WHERE sale_id = $1
+     ORDER BY id`,
+    [saleId]
+  );
+  return result.rows;
+}
+
+// Bloquea los productos involucrados antes de tocar stock. El ORDER BY importa:
+// dos ediciones simultáneas que compartan productos los toman siempre en el
+// mismo orden y no se traban entre sí.
+async function lockProducts(client, tenantId, productIds) {
+  if (productIds.length === 0) return new Map();
+  const result = await client.query(
+    `SELECT id, stock
+     FROM petshop_products
+     WHERE id = ANY($1::uuid[]) AND tenant_id = $2
+     ORDER BY id
+     FOR UPDATE`,
+    [productIds, tenantId]
+  );
+  return new Map(result.rows.map((row) => [String(row.id), row]));
+}
+
+app.put("/v2/petshop/sales/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = updatePetshopSaleSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const updates = parsed.data;
+  const { items } = updates;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const saleResult = await client.query(
+      `SELECT * FROM petshop_sales WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+      [req.params.id, req.tenantId]
+    );
+    if (saleResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Sale not found");
+    }
+
+    let saleItems = null;
+
+    if (items) {
+      const previousItems = await loadSaleItems(client, req.params.id);
+      // Hay que bloquear también los productos que salen de la venta: su stock
+      // también se mueve (vuelve).
+      const involvedIds = [
+        ...new Set([
+          ...previousItems.map((item) => String(item.product_id)),
+          ...items.map((item) => String(item.product_id))
+        ])
+      ];
+      const locked = await lockProducts(client, req.tenantId, involvedIds);
+
+      const missing = items.filter((item) => !locked.has(String(item.product_id)));
+      if (missing.length > 0) {
+        await client.query("ROLLBACK");
+        return sendError(res, 400, "Invalid product_id");
+      }
+
+      // Delta neto por producto: primero se devuelve lo que la venta tenía
+      // reservado y después se descuenta lo nuevo. Así un cambio de 2 a 3
+      // unidades mueve el stock en 1, no en 5.
+      const deltas = new Map();
+      previousItems.forEach((item) => {
+        const key = String(item.product_id);
+        deltas.set(key, (deltas.get(key) || 0) + Number(item.quantity));
+      });
+      items.forEach((item) => {
+        const key = String(item.product_id);
+        deltas.set(key, (deltas.get(key) || 0) - Number(item.quantity));
+      });
+
+      for (const [productId, delta] of deltas) {
+        // Un producto que estaba y sigue con la misma cantidad da delta 0: no
+        // tiene sentido escribirle una fila (ni moverle el updated_at).
+        if (delta === 0) continue;
+        // Los productos que salieron de la venta pueden haber sido borrados
+        // después: si ya no existen, no hay stock que devolver.
+        if (!locked.has(productId)) continue;
+        await client.query(
+          `UPDATE petshop_products
+           SET stock = stock + $1,
+               updated_at = now()
+           WHERE id = $2 AND tenant_id = $3`,
+          [delta, productId, req.tenantId]
+        );
+      }
+
+      await client.query(`DELETE FROM petshop_sale_items WHERE sale_id = $1`, [req.params.id]);
+
+      saleItems = [];
+      for (const item of items) {
+        const itemResult = await client.query(
+          `INSERT INTO petshop_sale_items
+           (sale_id, product_id, quantity, unit_price, tenant_id)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING *`,
+          [req.params.id, item.product_id, item.quantity, item.unit_price, req.tenantId]
+        );
+        saleItems.push(itemResult.rows[0]);
+      }
+    }
+
+    // Si cambiaron los ítems pero no mandaron total, lo recalculamos: dejar el
+    // total viejo con ítems nuevos desalinea la caja del día.
+    const payload = { ...updates };
+    delete payload.items;
+    if (items && payload.total === undefined) {
+      payload.total = items.reduce(
+        (sum, item) => sum + Number(item.quantity) * Number(item.unit_price),
+        0
+      );
+    }
+
+    const { fields, values, idx } = buildUpdate(
+      ["date", "customer_id", "stylist_id", "payment_method_id", "notes", "total"],
+      payload
+    );
+
+    let sale = saleResult.rows[0];
+    if (fields.length > 0) {
+      values.push(req.params.id);
+      const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
+      const updated = await client.query(
+        `UPDATE petshop_sales SET ${fields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`,
+        values
+      );
+      sale = updated.rows[0];
+    }
+
+    // Si no se tocaron los ítems, se releen para devolver la venta completa,
+    // igual que la devuelve el POST.
+    const responseItems = saleItems ?? (await loadSaleItems(client, req.params.id));
+
+    await client.query("COMMIT");
+    res.json({ ...sale, items: responseItems });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+});
+
+app.delete("/v2/petshop/sales/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const saleResult = await client.query(
+      `SELECT id FROM petshop_sales WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+      [req.params.id, req.tenantId]
+    );
+    if (saleResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Sale not found");
+    }
+
+    // Borrar la venta sin devolver el stock deja el inventario mintiendo: los
+    // productos siguen figurando como vendidos.
+    const saleItems = await loadSaleItems(client, req.params.id);
+    const productIds = [...new Set(saleItems.map((item) => String(item.product_id)))];
+    const locked = await lockProducts(client, req.tenantId, productIds);
+
+    const restored = new Map();
+    saleItems.forEach((item) => {
+      const key = String(item.product_id);
+      restored.set(key, (restored.get(key) || 0) + Number(item.quantity));
+    });
+
+    for (const [productId, quantity] of restored) {
+      if (!locked.has(productId)) continue;
+      await client.query(
+        `UPDATE petshop_products
+         SET stock = stock + $1,
+             updated_at = now()
+         WHERE id = $2 AND tenant_id = $3`,
+        [quantity, productId, req.tenantId]
+      );
+    }
+
+    // petshop_sale_items cae por CASCADE.
+    await client.query(`DELETE FROM petshop_sales WHERE id = $1 AND tenant_id = $2`, [
+      req.params.id,
+      req.tenantId
+    ]);
+
+    await client.query("COMMIT");
+    res.json({ ok: true });
   } catch (err) {
     await client.query("ROLLBACK");
     console.error(err);
