@@ -45,7 +45,7 @@ npm run dev
 
 ## Endpoints
 - `GET /health` -> `{ ok: true }`
-- `POST /auth/register` -> `{ token, user }`
+- `POST /auth/register` -> `410` (deshabilitado; usuarios se crean vía `/v2/users` o `/v2/super/tenants/:id/admin`)
 - `POST /auth/login` -> `{ token, user }`
 - `POST /auth/forgot-password` -> `{ ok: true }`
 - `POST /auth/reset-password` -> `{ ok: true }`

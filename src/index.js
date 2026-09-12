@@ -88,11 +88,16 @@ const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled"]);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
+// super_admin queda deliberadamente afuera: nadie puede auto-asignarse ni
+// asignarle a otro ese rol vía estas rutas tenant-scoped. La única forma de
+// crear un super_admin es una operación manual sobre la base.
+const assignableUserRoles = z.enum(["admin", "staff", "user"]);
+
 const createUserSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6).optional(),
   password_hash: z.string().min(1).optional(),
-  role: z.string().min(1)
+  role: assignableUserRoles
 }).refine((data) => data.password || data.password_hash, {
   message: "password or password_hash is required"
 });
@@ -101,7 +106,7 @@ const updateUserSchema = z.object({
   email: z.string().email().optional(),
   password: z.string().min(6).optional(),
   password_hash: z.string().min(1).optional(),
-  role: z.string().min(1).optional()
+  role: assignableUserRoles.optional()
 });
 
 const emptyStringToNull = (value) => {
@@ -597,41 +602,13 @@ app.get("/push/vapid-public-key", (_req, res) => {
   res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
 });
 
-app.post("/auth/register", async (req, res) => {
-  const schema = z.object({
-    email: z.string().email(),
-    password: z.string().min(6)
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) {
-    return sendError(res, 400, "Invalid request body");
-  }
-
-  if (!jwtSecret) {
-    return sendError(res, 500, "JWT_SECRET is not configured");
-  }
-
-  const { email, password } = parsed.data;
-
-  try {
-    const passwordHash = await hashPassword(password);
-    const result = await pool.query(
-      `INSERT INTO users (email, password_hash, role)
-       VALUES ($1, $2, $3)
-       RETURNING id, email, role, created_at`,
-      [email, passwordHash, "user"]
-    );
-
-    const user = result.rows[0];
-    const token = signToken(user);
-    res.status(201).json({ token, user });
-  } catch (err) {
-    if (err.code === "23505") {
-      return sendError(res, 409, "Email already exists");
-    }
-    console.error(err);
-    sendError(res, 500, "Unexpected error");
-  }
+// No existe auto-registro público a propósito: este sistema es multi-tenant y
+// todo usuario no-super_admin necesita un tenant_id asignado (ver middleware
+// más abajo). Las únicas formas válidas de crear un usuario son
+// POST /v2/users (admin de un tenant crea gente de su propio local) y
+// POST /v2/super/tenants/:id/admin (super_admin crea el admin de un local).
+app.post("/auth/register", (_req, res) => {
+  sendError(res, 410, "Self-registration is disabled. Contact your administrator.");
 });
 
 app.post("/auth/login", async (req, res) => {
@@ -764,23 +741,26 @@ app.use((req, res, next) => {
     return next();
   }
 
-  // Verificar que el tenant del usuario esté activo.
-  // Consultamos la DB solo si el usuario tiene tenant_id.
-  if (req.tenantId) {
-    pool.query("SELECT status, suspended_reason FROM tenants WHERE id = $1", [req.tenantId])
-      .then(({ rows }) => {
-        if (!rows.length || rows[0].status !== "active") {
-          return res.status(403).json({
-            message: "Tenant is inactive",
-            suspended_reason: rows[0]?.suspended_reason ?? null,
-          });
-        }
-        next();
-      })
-      .catch(() => sendError(res, 500, "Unexpected error"));
-  } else {
-    next();
+  // Todo usuario no-super_admin debe tener tenant_id: es la única forma en que
+  // las rutas de abajo aíslan los datos de cada local. Sin este chequeo, un
+  // usuario sin tenant_id "ve" datos de todos los locales en cualquier endpoint
+  // que arme su filtro como `if (req.tenantId) { ... }`.
+  if (!req.tenantId) {
+    return sendError(res, 403, "User has no tenant assigned");
   }
+
+  // Verificar que el tenant del usuario esté activo.
+  pool.query("SELECT status, suspended_reason FROM tenants WHERE id = $1", [req.tenantId])
+    .then(({ rows }) => {
+      if (!rows.length || rows[0].status !== "active") {
+        return res.status(403).json({
+          message: "Tenant is inactive",
+          suspended_reason: rows[0]?.suspended_reason ?? null,
+        });
+      }
+      next();
+    })
+    .catch(() => sendError(res, 500, "Unexpected error"));
 });
 
 app.post("/push/subscribe", async (req, res) => {
@@ -1277,6 +1257,8 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
 });
 
 app.put("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
   const parsed = updateUserSchema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
@@ -1296,12 +1278,12 @@ app.put("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => 
     return sendError(res, 400, "No fields to update");
   }
 
-  values.push(req.params.id);
+  values.push(req.params.id, req.tenantId);
 
   try {
     const result = await pool.query(
       `UPDATE users SET ${fields.join(", ")}
-       WHERE id = $${idx}
+       WHERE id = $${idx} AND tenant_id = $${idx + 1}
        RETURNING id, email, role, created_at`,
       values
     );
