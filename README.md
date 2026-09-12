@@ -27,6 +27,7 @@ SMTP_PORT=587
 SMTP_USER=usuario
 SMTP_PASS=clave
 SMTP_SECURE=false
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 Notas:
 - Para proveedores como Supabase, suele venir `?sslmode=require` en `DATABASE_URL`.
@@ -138,6 +139,7 @@ npm run dev
 - `POST /v2/fixed-expenses`
 - `PUT /v2/fixed-expenses/:id`
 - `DELETE /v2/fixed-expenses/:id`
+- `POST /v2/assistant/messages` -> `{ reply, queriesLeft }` (proxy del asistente de IA a Anthropic; requiere `ANTHROPIC_API_KEY`, 20 consultas/mes por tenant)
 
 ## Deploy en Railway
 1. Crea un nuevo proyecto en Railway y conecta el repo.

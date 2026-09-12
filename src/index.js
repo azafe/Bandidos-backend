@@ -500,9 +500,34 @@ const createRateLimiter = ({ windowMs, max }) => {
       timestamps.push(now);
       hits.set(key, timestamps);
       return true;
+    },
+    remaining(key) {
+      const now = Date.now();
+      const timestamps = hits.get(key) ?? [];
+      prune(timestamps, now);
+      return Math.max(0, max - timestamps.length);
     }
   };
 };
+
+const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+// Límite real (a diferencia del contador viejo en localStorage del frontend,
+// que cualquiera podía resetear borrando el storage). Ventana móvil de 30
+// días en vez de mes calendario: más simple que resetear un contador el día 1.
+const assistantLimiter = createRateLimiter({ windowMs: 30 * 24 * 60 * 60 * 1000, max: 20 });
+
+const assistantMessageSchema = z.object({
+  system: z.string().min(1).max(20000),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().min(1).max(4000)
+      })
+    )
+    .min(1)
+    .max(40)
+});
 
 const forgotPasswordIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
 const forgotPasswordEmailLimiter = createRateLimiter({
@@ -793,6 +818,60 @@ app.delete("/push/subscribe", async (req, res) => {
     [req.tenantId, device_id]
   );
   res.json({ ok: true });
+});
+
+// Proxy del asistente de IA: el frontend arma el system prompt con los datos
+// del negocio (ya los tiene, vía sus propios pedidos autenticados) y nos lo
+// manda a nosotros en vez de pegarle directo a Anthropic — así la API key
+// vive solo acá, nunca en el bundle del navegador.
+app.post("/v2/assistant/messages", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicApiKey) {
+    return sendError(res, 500, "ANTHROPIC_API_KEY is not configured");
+  }
+
+  const parsed = assistantMessageSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return sendError(res, 400, "Invalid request body");
+  }
+
+  if (!assistantLimiter.consume(req.tenantId)) {
+    return res.status(429).json({ message: "Monthly query limit reached", queriesLeft: 0 });
+  }
+
+  const { system, messages } = parsed.data;
+
+  try {
+    const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": anthropicApiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1024,
+        system,
+        messages
+      })
+    });
+
+    if (!anthropicRes.ok) {
+      const errBody = await anthropicRes.json().catch(() => ({}));
+      console.error("[assistant] Anthropic error:", errBody);
+      return sendError(res, 502, "AI assistant is unavailable right now");
+    }
+
+    const data = await anthropicRes.json();
+    const reply = data.content?.[0]?.text || "No pude generar una respuesta.";
+    res.json({ reply, queriesLeft: assistantLimiter.remaining(req.tenantId) });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
 });
 
 app.get("/me", requireAuth, async (req, res) => {
