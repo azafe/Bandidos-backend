@@ -96,7 +96,7 @@ test("proxy del asistente de IA", async (t) => {
     mockAnthropicFetch((url, options) => {
       capturedHeaders = options.headers;
       return new Response(
-        JSON.stringify({ content: [{ text: "Facturaste $50.000 hoy." }] }),
+        JSON.stringify({ content: [{ type: "text", text: "Facturaste $50.000 hoy." }] }),
         { status: 200, headers: { "content-type": "application/json" } }
       );
     });
@@ -111,10 +111,32 @@ test("proxy del asistente de IA", async (t) => {
     });
   });
 
+  await t.test("un bloque de thinking antes del texto no rompe la respuesta (claude-sonnet-5 piensa por defecto)", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test-key";
+    mockAnthropicFetch(() => {
+      return new Response(
+        JSON.stringify({
+          content: [
+            { type: "thinking", thinking: "el usuario pregunta por la facturación de hoy..." },
+            { type: "text", text: "Facturaste $50.000 hoy." }
+          ]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await postAssistant(baseUrl, tokenFor(crypto.randomUUID()), validBody);
+      const body = await res.json();
+      assert.equal(res.status, 200);
+      assert.equal(body.reply, "Facturaste $50.000 hoy.");
+    });
+  });
+
   await t.test("un system prompt realista (con el detalle de un mes de servicios) no da 400", async () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-test-key";
     mockAnthropicFetch(() => {
-      return new Response(JSON.stringify({ content: [{ text: "ok" }] }), {
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -149,7 +171,7 @@ test("proxy del asistente de IA", async (t) => {
     let callCount = 0;
     mockAnthropicFetch(() => {
       callCount += 1;
-      return new Response(JSON.stringify({ content: [{ text: "ok" }] }), {
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });

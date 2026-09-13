@@ -858,7 +858,11 @@ app.post("/v2/assistant/messages", async (req, res) => {
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 1024,
+        // claude-sonnet-5 piensa (thinking adaptativo) por defecto salvo que
+        // se desactive explícitamente, y esos tokens de razonamiento salen
+        // del mismo max_tokens. Con 1024 el modelo podía gastar todo el
+        // presupuesto pensando y no dejar lugar para el texto de respuesta.
+        max_tokens: 16000,
         system,
         messages
       })
@@ -871,7 +875,11 @@ app.post("/v2/assistant/messages", async (req, res) => {
     }
 
     const data = await anthropicRes.json();
-    const reply = data.content?.[0]?.text || "No pude generar una respuesta.";
+    // El contenido puede traer bloques de "thinking" antes del texto (mismo
+    // motivo que el max_tokens de arriba): no asumir que content[0] es el
+    // texto, buscar el bloque de tipo "text".
+    const textBlock = data.content?.find((block) => block.type === "text");
+    const reply = textBlock?.text || "No pude generar una respuesta.";
     res.json({ reply, queriesLeft: assistantLimiter.remaining(req.tenantId) });
   } catch (err) {
     console.error(err);
