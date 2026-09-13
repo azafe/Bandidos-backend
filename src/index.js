@@ -510,7 +510,7 @@ const createRateLimiter = ({ windowMs, max }) => {
   };
 };
 
-const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+const ANTHROPIC_MODEL = "claude-sonnet-5";
 // Límite real (a diferencia del contador viejo en localStorage del frontend,
 // que cualquiera podía resetear borrando el storage). Ventana móvil de 30
 // días en vez de mes calendario: más simple que resetear un contador el día 1.
