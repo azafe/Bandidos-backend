@@ -516,13 +516,18 @@ const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 // días en vez de mes calendario: más simple que resetear un contador el día 1.
 const assistantLimiter = createRateLimiter({ windowMs: 30 * 24 * 60 * 60 * 1000, max: 20 });
 
+// El system prompt lo arma el frontend volcando datos reales del negocio
+// (servicios, clientes, turnos) como texto — para un local con actividad
+// puede pasar largo los 20-30 mil caracteres sin que eso sea abuso. El límite
+// real de tamaño de pedido ya lo pone express.json({ limit: "6mb" }) más
+// arriba; esto solo evita algo groseramente fuera de rango.
 const assistantMessageSchema = z.object({
-  system: z.string().min(1).max(20000),
+  system: z.string().min(1).max(200000),
   messages: z
     .array(
       z.object({
         role: z.enum(["user", "assistant"]),
-        content: z.string().min(1).max(4000)
+        content: z.string().min(1).max(8000)
       })
     )
     .min(1)

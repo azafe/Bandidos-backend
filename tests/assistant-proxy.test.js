@@ -111,6 +111,28 @@ test("proxy del asistente de IA", async (t) => {
     });
   });
 
+  await t.test("un system prompt realista (con el detalle de un mes de servicios) no da 400", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test-key";
+    mockAnthropicFetch(() => {
+      return new Response(JSON.stringify({ content: [{ text: "ok" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    });
+
+    // Un local con actividad real puede volcar 200 servicios + 100 clientes +
+    // turnos como texto en el system prompt (ver AsistenteIA.jsx) y superar
+    // fácilmente 30-40 mil caracteres sin que eso sea abuso.
+    const bigSystemPrompt = "Sos el asistente de Bandidos.\n".repeat(2000);
+    await withServer(async (baseUrl) => {
+      const res = await postAssistant(baseUrl, tokenFor(crypto.randomUUID()), {
+        system: bigSystemPrompt,
+        messages: validBody.messages
+      });
+      assert.equal(res.status, 200);
+    });
+  });
+
   await t.test("un body inválido (sin messages) da 400", async () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-test-key";
     mockAnthropicFetch(() => {
