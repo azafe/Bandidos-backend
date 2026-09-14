@@ -534,6 +534,11 @@ const assistantMessageSchema = z.object({
     .max(40)
 });
 
+// A diferencia de forgot-password (que ya tenía límite), login no tenía
+// ninguno: permitía fuerza bruta de contraseñas a velocidad ilimitada.
+const loginIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 30 });
+const loginEmailLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
+
 const forgotPasswordIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
 const forgotPasswordEmailLimiter = createRateLimiter({
   windowMs: 60 * 60 * 1000,
@@ -649,6 +654,11 @@ app.post("/auth/login", async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     return sendError(res, 400, "Invalid request body");
+  }
+
+  const ip = getClientIp(req);
+  if (!loginIpLimiter.consume(ip) || !loginEmailLimiter.consume(parsed.data.email.toLowerCase())) {
+    return sendError(res, 429, "Too many requests");
   }
 
   if (!jwtSecret) {
