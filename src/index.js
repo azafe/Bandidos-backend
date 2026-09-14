@@ -2736,16 +2736,13 @@ app.post("/v2/petshop/stock-movements", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const productResult = await client.query(
-      "SELECT * FROM petshop_products WHERE id = $1 FOR UPDATE",
-      [product_id]
-    );
-    if (productResult.rowCount === 0) {
+    const locked = await lockProducts(client, req.tenantId, [product_id]);
+    const product = locked.get(String(product_id));
+    if (!product) {
       await client.query("ROLLBACK");
       return sendError(res, 400, "Invalid product_id");
     }
 
-    const product = productResult.rows[0];
     let newStock = product.stock;
     if (type === "in") {
       newStock += quantity;
@@ -2759,9 +2756,9 @@ app.post("/v2/petshop/stock-movements", async (req, res) => {
       `UPDATE petshop_products
        SET stock = $1,
            updated_at = now()
-       WHERE id = $2
+       WHERE id = $2 AND tenant_id = $3
        RETURNING *`,
-      [newStock, product_id]
+      [newStock, product_id, req.tenantId]
     );
 
     const movementResult = await client.query(
