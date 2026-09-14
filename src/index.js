@@ -1787,6 +1787,16 @@ app.post("/v2/pets/:id/photo", async (req, res) => {
   if (decoded.error) return sendError(res, 400, decoded.error);
 
   try {
+    // La key de storage (pets/{id}) no lleva tenant: si subiéramos la foto
+    // antes de este chequeo, un id de otra mascota de otro tenant igual
+    // pisaría su archivo en Supabase Storage, aunque el UPDATE de abajo
+    // rechace el guardado en la base.
+    const owned = await pool.query(
+      "SELECT 1 FROM pets WHERE id = $1 AND tenant_id = $2",
+      [req.params.id, req.tenantId]
+    );
+    if (owned.rowCount === 0) return sendError(res, 404, "Pet not found");
+
     const photoUrl = await uploadPhoto("pets", req.params.id, decoded.buffer, decoded.mimeType);
     const params = [photoUrl, req.params.id];
     const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -2184,6 +2194,14 @@ app.post("/agenda/:id/photo", async (req, res) => {
   if (decoded.error) return sendError(res, 400, decoded.error);
 
   try {
+    // Mismo motivo que en /v2/pets/:id/photo: la key de storage no lleva
+    // tenant, así que hay que confirmar la pertenencia antes de subir.
+    const owned = await pool.query(
+      "SELECT 1 FROM agenda_turnos WHERE id = $1 AND tenant_id = $2",
+      [req.params.id, req.tenantId]
+    );
+    if (owned.rowCount === 0) return sendError(res, 404, "Agenda item not found");
+
     const photoUrl = await uploadPhoto("turnos", req.params.id, decoded.buffer, decoded.mimeType);
     const params = [photoUrl, req.params.id];
     const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;

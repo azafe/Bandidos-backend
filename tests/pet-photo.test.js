@@ -8,12 +8,18 @@ process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
 process.env.JWT_SECRET ||= "test-secret";
 
 const FAKE_PHOTO_URL = "https://example.com/fake-photo.png";
+let uploadPhotoCalls = 0;
 
 // Must mock before importing index.js, which imports storage.js eagerly at
 // module-load time — mocking after that point would leave index.js's bound
 // reference pointing at the real uploadPhoto.
 mock.module("../src/storage.js", {
-  namedExports: { uploadPhoto: async () => FAKE_PHOTO_URL }
+  namedExports: {
+    uploadPhoto: async () => {
+      uploadPhotoCalls += 1;
+      return FAKE_PHOTO_URL;
+    }
+  }
 });
 
 const { app } = await import("../src/index.js");
@@ -44,6 +50,14 @@ const createPetsPoolMock = () => {
 
     if (normalized.startsWith("select status, suspended_reason from tenants")) {
       return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
+    }
+
+    if (normalized.startsWith("select 1 from pets where id")) {
+      const [id, tenantId] = params;
+      const pet = pets.get(id);
+      return pet && pet.tenant_id === tenantId
+        ? { rowCount: 1, rows: [{ "?column?": 1 }] }
+        : { rowCount: 0, rows: [] };
     }
 
     if (normalized.startsWith("update pets set photo_url")) {
@@ -133,16 +147,21 @@ test("POST /v2/pets/:id/photo", async (t) => {
     assert.equal(body.photo_url, FAKE_PHOTO_URL);
   });
 
-  await t.test("returns 404 for a pet outside the tenant", async () => {
+  await t.test("returns 404 for a pet outside the tenant, and never uploads its photo", async () => {
     const otherToken = jwt.sign(
       { sub: crypto.randomUUID(), role: "admin", email: "other@example.com", tenant_id: crypto.randomUUID() },
       process.env.JWT_SECRET
     );
+    const callsBefore = uploadPhotoCalls;
     const { status } = await requestJson(baseUrl, `/v2/pets/${PET_ID}/photo`, {
       method: "POST",
       token: otherToken,
       body: { image: `data:image/png;base64,${TINY_PNG_BASE64}` }
     });
     assert.equal(status, 404);
+    // La key de storage (pets/{id}) no lleva tenant: si esto llegara a
+    // subir, pisaría el archivo real de la mascota del otro tenant aunque
+    // la base rechace el guardado.
+    assert.equal(uploadPhotoCalls, callsBefore, "no debería haber subido nada a storage");
   });
 });
