@@ -1437,7 +1437,7 @@ app.get("/v2/employees/:id", async (req, res) => {
   }
 });
 
-app.post("/v2/employees", async (req, res) => {
+app.post("/v2/employees", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -1458,7 +1458,7 @@ app.post("/v2/employees", async (req, res) => {
   }
 });
 
-app.put("/v2/employees/:id", async (req, res) => {
+app.put("/v2/employees/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -1485,7 +1485,7 @@ app.put("/v2/employees/:id", async (req, res) => {
   }
 });
 
-app.delete("/v2/employees/:id", async (req, res) => {
+app.delete("/v2/employees/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -2870,7 +2870,7 @@ app.post("/v2/services", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/services/:id", async (req, res) => {
+app.put("/v2/services/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2892,7 +2892,7 @@ app.put("/v2/services/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/services/:id", async (req, res) => {
+app.delete("/v2/services/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -2964,7 +2964,7 @@ app.get("/v2/suppliers/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/suppliers", async (req, res) => {
+app.post("/v2/suppliers", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createSupplierSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2979,7 +2979,7 @@ app.post("/v2/suppliers", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/suppliers/:id", async (req, res) => {
+app.put("/v2/suppliers/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateSupplierSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2996,7 +2996,7 @@ app.put("/v2/suppliers/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/suppliers/:id", async (req, res) => {
+app.delete("/v2/suppliers/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -3023,7 +3023,7 @@ app.get("/v2/suppliers/:id/movements", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/suppliers/:id/movements", async (req, res) => {
+app.post("/v2/suppliers/:id/movements", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createSupplierMovementSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
