@@ -2305,7 +2305,7 @@ app.get("/v2/payment-methods/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/payment-methods", async (req, res) => {
+app.post("/v2/payment-methods", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPaymentMethodSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2319,7 +2319,7 @@ app.post("/v2/payment-methods", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/payment-methods/:id", async (req, res) => {
+app.put("/v2/payment-methods/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updatePaymentMethodSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2336,7 +2336,7 @@ app.put("/v2/payment-methods/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/payment-methods/:id", async (req, res) => {
+app.delete("/v2/payment-methods/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -3112,7 +3112,7 @@ app.get("/v2/expense-categories/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/expense-categories", async (req, res) => {
+app.post("/v2/expense-categories", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createExpenseCategorySchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3126,7 +3126,7 @@ app.post("/v2/expense-categories", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/expense-categories/:id", async (req, res) => {
+app.put("/v2/expense-categories/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateExpenseCategorySchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3143,7 +3143,7 @@ app.put("/v2/expense-categories/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/expense-categories/:id", async (req, res) => {
+app.delete("/v2/expense-categories/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;

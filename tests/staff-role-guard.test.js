@@ -1,7 +1,9 @@
-// Cubre el guard de rol agregado a Empleados, Proveedores y Servicios:
-// gestionar (crear/editar/borrar) esos recursos es cosa de admin, pero
-// leerlos y crear un Servicio siguen abiertos a cualquier rol -staff los
-// necesita en la Agenda, el PetShop y el detalle de mascota (ver
+// Cubre el guard de rol agregado a Empleados, Proveedores, Servicios,
+// Métodos de Pago y Categorías de Gastos: gestionar (crear/editar/borrar)
+// esos recursos es cosa de admin, pero leerlos sigue abierto a cualquier
+// rol -DailyExpensesPage, DailyIncomesPage y PetShopPage (todas accesibles
+// para staff) necesitan el GET de payment-methods/expense-categories para
+// sus combos, y staff necesita poder crear un Servicio (ver
 // createServiceFromTurno en AgendaPage.jsx, que crea un servicio real al
 // finalizar un turno).
 import assert from "node:assert/strict";
@@ -83,6 +85,8 @@ test("guard de rol admin en Empleados/Proveedores/Servicios", async (t) => {
   const validEmployee = { name: "Ana", role: "Groomer", status: "active" };
   const validSupplier = { name: "Proveedor SRL" };
   const validMovement = { date: "2026-09-01", tipo: "cargo", monto: 1000 };
+  const validPaymentMethod = { name: "Transferencia" };
+  const validExpenseCategory = { name: "Insumos" };
   const validService = {
     date: "2026-09-01",
     pet_id: crypto.randomUUID(),
@@ -101,7 +105,13 @@ test("guard de rol admin en Empleados/Proveedores/Servicios", async (t) => {
     ["DELETE", `/v2/suppliers/${EXISTING_ID}`, undefined],
     ["POST", `/v2/suppliers/${EXISTING_ID}/movements`, validMovement],
     ["PUT", `/v2/services/${EXISTING_ID}`, { price: 6000 }],
-    ["DELETE", `/v2/services/${EXISTING_ID}`, undefined]
+    ["DELETE", `/v2/services/${EXISTING_ID}`, undefined],
+    ["POST", "/v2/payment-methods", validPaymentMethod],
+    ["PUT", `/v2/payment-methods/${EXISTING_ID}`, { name: "Otro" }],
+    ["DELETE", `/v2/payment-methods/${EXISTING_ID}`, undefined],
+    ["POST", "/v2/expense-categories", validExpenseCategory],
+    ["PUT", `/v2/expense-categories/${EXISTING_ID}`, { name: "Otra" }],
+    ["DELETE", `/v2/expense-categories/${EXISTING_ID}`, undefined]
   ];
 
   for (const [method, path] of blockedForStaff) {
@@ -115,7 +125,9 @@ test("guard de rol admin en Empleados/Proveedores/Servicios", async (t) => {
     ["GET", "/v2/employees", undefined],
     ["GET", "/v2/suppliers", undefined],
     ["GET", "/v2/services", undefined],
-    ["POST", "/v2/services", validService]
+    ["POST", "/v2/services", validService],
+    ["GET", "/v2/payment-methods", undefined],
+    ["GET", "/v2/expense-categories", undefined]
   ];
 
   for (const [method, path, body] of allowedForStaff) {
@@ -128,7 +140,9 @@ test("guard de rol admin en Empleados/Proveedores/Servicios", async (t) => {
   const adminCanManage = [
     ["POST", "/v2/employees", validEmployee],
     ["POST", "/v2/suppliers", validSupplier],
-    ["PUT", `/v2/services/${EXISTING_ID}`, { price: 6000 }]
+    ["PUT", `/v2/services/${EXISTING_ID}`, { price: 6000 }],
+    ["POST", "/v2/payment-methods", validPaymentMethod],
+    ["POST", "/v2/expense-categories", validExpenseCategory]
   ];
 
   for (const [method, path, body] of adminCanManage) {
