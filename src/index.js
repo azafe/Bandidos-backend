@@ -93,9 +93,11 @@ const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 // crear un super_admin es una operación manual sobre la base.
 const assignableUserRoles = z.enum(["admin", "staff", "user"]);
 
+// min(8) para que una contraseña nueva nunca quede más débil que lo que el
+// propio flujo de reseteo exige (resetPasswordSchema, también min 8).
 const createUserSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(6).optional(),
+  password: z.string().min(8).optional(),
   password_hash: z.string().min(1).optional(),
   role: assignableUserRoles
 }).refine((data) => data.password || data.password_hash, {
@@ -104,7 +106,7 @@ const createUserSchema = z.object({
 
 const updateUserSchema = z.object({
   email: z.string().email().optional(),
-  password: z.string().min(6).optional(),
+  password: z.string().min(8).optional(),
   password_hash: z.string().min(1).optional(),
   role: assignableUserRoles.optional()
 });
@@ -571,7 +573,7 @@ const requireAuth = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, jwtSecret);
+    const decoded = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] });
     req.user = decoded;
     return next();
   } catch (err) {
@@ -2113,17 +2115,6 @@ app.put("/agenda/:id", async (req, res) => {
   }
 
   try {
-    if (updates.date || updates.time) {
-      const current = await pool.query(
-        "SELECT date, time FROM agenda_turnos WHERE id = $1",
-        [req.params.id]
-      );
-      if (current.rowCount === 0) {
-        return sendError(res, 404, "Agenda item not found");
-      }
-
-    }
-
     values.push(req.params.id);
     const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
 
@@ -4006,7 +3997,7 @@ app.patch("/v2/super/tenants/:id", requireAuth, requireSuperAdmin, async (req, r
 app.post("/v2/super/tenants/:id/admin", requireAuth, requireSuperAdmin, async (req, res) => {
   const schema = z.object({
     email:    z.string().email(),
-    password: z.string().min(6)
+    password: z.string().min(8)
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
