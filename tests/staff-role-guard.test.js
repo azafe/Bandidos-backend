@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -24,19 +25,21 @@ const EXISTING_ID = crypto.randomUUID();
 
 const norm = (sql) => sql.replace(/\s+/g, " ").trim().toLowerCase();
 
-const tokenFor = (role) =>
-  jwt.sign(
-    { sub: crypto.randomUUID(), role, email: `${role}@test.com`, tenant_id: TENANT_ID },
+const tokenFor = (role) => {
+  const sub = registerUser({ role, tenant_id: TENANT_ID });
+  return jwt.sign(
+    { sub, role, email: `${role}@test.com`, tenant_id: TENANT_ID },
     process.env.JWT_SECRET
   );
+};
 
 function createFakeDb() {
-  const query = async (sql) => {
+  const query = async (sql, params = []) => {
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
+
     const q = norm(sql);
 
-    if (q.startsWith("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
-    }
     // Cualquier SELECT de listado/detalle: alcanza con no explotar.
     if (q.startsWith("select")) {
       return { rowCount: 1, rows: [{ id: EXISTING_ID }] };

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test, { mock } from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -33,11 +34,13 @@ const TURNO_ID = crypto.randomUUID();
 const TINY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-const tokenFor = (tenantId) =>
-  jwt.sign(
-    { sub: crypto.randomUUID(), role: "admin", email: "test@example.com", tenant_id: tenantId },
+const tokenFor = (tenantId) => {
+  const sub = registerUser({ role: "admin", tenant_id: tenantId });
+  return jwt.sign(
+    { sub, role: "admin", email: "test@example.com", tenant_id: tenantId },
     process.env.JWT_SECRET
   );
+};
 
 function createTurnosPoolMock() {
   const turnos = new Map([
@@ -45,11 +48,11 @@ function createTurnosPoolMock() {
   ]);
 
   const query = async (sql, params = []) => {
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
+
     const q = sql.replace(/\s+/g, " ").trim().toLowerCase();
 
-    if (q.startsWith("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
-    }
     if (q.startsWith("select 1 from agenda_turnos where id")) {
       const [id, tenantId] = params;
       const turno = turnos.get(id);

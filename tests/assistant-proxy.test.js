@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -15,18 +16,19 @@ const { app } = await import("../src/index.js");
 const { pool } = await import("../src/db.js");
 const jwt = (await import("jsonwebtoken")).default;
 
-const tokenFor = (tenantId) =>
-  jwt.sign(
-    { sub: crypto.randomUUID(), role: "admin", email: "admin@test.com", tenant_id: tenantId },
+const tokenFor = (tenantId) => {
+  const sub = registerUser({ role: "admin", tenant_id: tenantId });
+  return jwt.sign(
+    { sub, role: "admin", email: "admin@test.com", tenant_id: tenantId },
     process.env.JWT_SECRET
   );
+};
 
 async function withServer(fn) {
   const originalQuery = pool.query.bind(pool);
-  pool.query = async (sql) => {
-    if (sql.toLowerCase().includes("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
-    }
+  pool.query = async (sql, params = []) => {
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
     throw new Error(`Unexpected SQL in assistant-proxy test: ${sql}`);
   };
 

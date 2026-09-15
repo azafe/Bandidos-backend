@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -21,10 +22,9 @@ const TENANT_ID = crypto.randomUUID();
 
 async function withServer(fn) {
   const originalQuery = pool.query.bind(pool);
-  pool.query = async (sql) => {
-    if (sql.toLowerCase().includes("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
-    }
+  pool.query = async (sql, params = []) => {
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
     return { rowCount: 0, rows: [] };
   };
 
@@ -61,8 +61,9 @@ test("jwt.verify rechaza un token firmado con alg none", async () => {
 
 test("una contraseña de 6 caracteres ya no alcanza para crear un usuario", async () => {
   await withServer(async (baseUrl) => {
+    const adminSub = registerUser({ role: "admin", tenant_id: TENANT_ID });
     const adminToken = jwt.sign(
-      { sub: crypto.randomUUID(), role: "admin", email: "admin@test.com", tenant_id: TENANT_ID },
+      { sub: adminSub, role: "admin", email: "admin@test.com", tenant_id: TENANT_ID },
       process.env.JWT_SECRET
     );
     const res = await fetch(`${baseUrl}/v2/users`, {

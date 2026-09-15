@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test, { mock } from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -30,8 +31,9 @@ const TENANT_ID = crypto.randomUUID();
 const PET_ID = crypto.randomUUID();
 
 function signTestToken() {
+  const sub = registerUser({ role: "admin", tenant_id: TENANT_ID });
   return jwt.sign(
-    { sub: crypto.randomUUID(), role: "admin", email: "test@example.com", tenant_id: TENANT_ID },
+    { sub, role: "admin", email: "test@example.com", tenant_id: TENANT_ID },
     process.env.JWT_SECRET
   );
 }
@@ -46,11 +48,10 @@ const createPetsPoolMock = () => {
   ]);
 
   const query = async (sql, params = []) => {
-    const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
 
-    if (normalized.startsWith("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
-    }
+    const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
 
     if (normalized.startsWith("select 1 from pets where id")) {
       const [id, tenantId] = params;
@@ -148,8 +149,10 @@ test("POST /v2/pets/:id/photo", async (t) => {
   });
 
   await t.test("returns 404 for a pet outside the tenant, and never uploads its photo", async () => {
+    const otherTenantId = crypto.randomUUID();
+    const otherSub = registerUser({ role: "admin", tenant_id: otherTenantId });
     const otherToken = jwt.sign(
-      { sub: crypto.randomUUID(), role: "admin", email: "other@example.com", tenant_id: crypto.randomUUID() },
+      { sub: otherSub, role: "admin", email: "other@example.com", tenant_id: otherTenantId },
       process.env.JWT_SECRET
     );
     const callsBefore = uploadPhotoCalls;

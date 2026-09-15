@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -21,11 +22,13 @@ const SHAMPOO_ID = crypto.randomUUID();
 const COLLAR_ID = crypto.randomUUID();
 const PAYMENT_METHOD_ID = crypto.randomUUID();
 
-const signToken = (tenantId) =>
-  jwt.sign(
-    { sub: crypto.randomUUID(), role: "admin", email: "test@example.com", tenant_id: tenantId },
+const signToken = (tenantId) => {
+  const sub = registerUser({ role: "admin", tenant_id: tenantId });
+  return jwt.sign(
+    { sub, role: "admin", email: "test@example.com", tenant_id: tenantId },
     process.env.JWT_SECRET
   );
+};
 
 const norm = (sql) => sql.replace(/\s+/g, " ").trim().toLowerCase();
 
@@ -75,6 +78,9 @@ function createFakeDb() {
   };
 
   const query = async (sql, params = []) => {
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
+
     const q = norm(sql);
 
     if (q === "begin") {
@@ -89,10 +95,6 @@ function createFakeDb() {
       if (snapshot) restore(snapshot);
       snapshot = null;
       return { rowCount: 0, rows: [] };
-    }
-
-    if (q.startsWith("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
     }
 
     if (q.startsWith("select * from petshop_sales where id")) {

@@ -99,6 +99,15 @@ if (!TEST_URL) {
       `INSERT INTO tenants (id, name) VALUES ($1, 'Test') ON CONFLICT DO NOTHING`,
       [TENANT]
     );
+    // El middleware revalida rol/tenant contra esta tabla en cada request
+    // (ver src/index.js): sin esta fila, el token firmado más abajo pasaría
+    // la firma pero el JOIN no encontraría al usuario y daría 401.
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, role, tenant_id)
+       VALUES ('11111111-1111-1111-1111-111111111111', 'test@test.local', 'x', 'admin', $1)
+       ON CONFLICT DO NOTHING`,
+      [TENANT]
+    );
     for (const t of ["fixed_expenses", "expense_categories", "payment_methods",
                      "suppliers", "employees", "daily_expenses", "services"]) {
       await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS tenant_id uuid REFERENCES tenants(id)`);

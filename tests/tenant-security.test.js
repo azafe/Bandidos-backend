@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test from "node:test";
+import { registerUser, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
@@ -24,8 +25,10 @@ const norm = (sql) => sql.replace(/\s+/g, " ").trim().toLowerCase();
 
 const signToken = (payload) => jwt.sign(payload, process.env.JWT_SECRET);
 
-const adminTokenFor = (tenantId) =>
-  signToken({ sub: crypto.randomUUID(), role: "admin", email: "admin@a.test", tenant_id: tenantId });
+const adminTokenFor = (tenantId) => {
+  const sub = registerUser({ role: "admin", tenant_id: tenantId });
+  return signToken({ sub, role: "admin", email: "admin@a.test", tenant_id: tenantId });
+};
 
 function createFakeDb() {
   const users = new Map([
@@ -33,11 +36,10 @@ function createFakeDb() {
   ]);
 
   const query = async (sql, params = []) => {
-    const q = norm(sql);
+    const authRow = handleAuthRevalidation(sql, params);
+    if (authRow) return authRow;
 
-    if (q.startsWith("select status, suspended_reason from tenants")) {
-      return { rowCount: 1, rows: [{ status: "active", suspended_reason: null }] };
-    }
+    const q = norm(sql);
 
     if (q.startsWith("update users set")) {
       const tenantId = params[params.length - 1];
@@ -102,8 +104,9 @@ test("aislamiento entre tenants", async (t) => {
   });
 
   await t.test("un token sin tenant_id no puede leer datos de negocio", async () => {
+    const subSinTenant = registerUser({ role: "admin", tenant_id: null });
     const tokenSinTenant = signToken({
-      sub: crypto.randomUUID(),
+      sub: subSinTenant,
       role: "admin",
       email: "sin-tenant@test.com",
       tenant_id: null

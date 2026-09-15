@@ -766,43 +766,66 @@ app.post("/auth/reset-password", async (req, res) => {
 
 app.use(requireAuth);
 
-// Extrae tenant_id del JWT y lo pone en req.tenantId.
-// También bloquea tenants inactivos y super_admin en rutas de datos.
+// Revalida rol y tenant_id contra la base en cada request, en vez de confiar
+// ciegamente en lo que dice el JWT: el token dura 7 días, así que sin esto
+// un cambio de rol, una baja de usuario o una suspensión de tenant tardarían
+// hasta 7 días en aplicarse. Pisa req.user.role/req.tenantId con el valor
+// actual -de ahí en más, requireRole() y todo el resto de la app ya
+// trabajan con el dato fresco, no con el que traía el token.
 app.use((req, res, next) => {
-  req.tenantId = req.user?.tenant_id ?? null;
+  const userId = req.user?.sub;
+  if (!userId) return sendError(res, 401, "Unauthorized");
 
-  // Si es super_admin y NO está en una ruta de superadmin (/v2/super/...),
-  // ni en /me o /health, bloqueamos el acceso.
-  if (req.user?.role === "super_admin") {
-    const path = req.path;
-    const isSuperRoute = path.startsWith("/v2/super/");
-    const isPublic = path === "/me" || path === "/health" || path === "/auth/logout";
-    if (!isSuperRoute && !isPublic) {
-      return sendError(res, 403, "Super Admin cannot access tenant data routes");
-    }
-    return next();
-  }
-
-  // Todo usuario no-super_admin debe tener tenant_id: es la única forma en que
-  // las rutas de abajo aíslan los datos de cada local. Sin este chequeo, un
-  // usuario sin tenant_id "ve" datos de todos los locales en cualquier endpoint
-  // que arme su filtro como `if (req.tenantId) { ... }`.
-  if (!req.tenantId) {
-    return sendError(res, 403, "User has no tenant assigned");
-  }
-
-  // Verificar que el tenant del usuario esté activo.
-  pool.query("SELECT status, suspended_reason FROM tenants WHERE id = $1", [req.tenantId])
+  pool.query(
+    `SELECT u.role, u.tenant_id, t.status AS tenant_status, t.suspended_reason
+     FROM users u
+     LEFT JOIN tenants t ON t.id = u.tenant_id
+     WHERE u.id = $1`,
+    [userId]
+  )
     .then(({ rows }) => {
-      if (!rows.length || rows[0].status !== "active") {
+      // El usuario del token ya no existe (lo borraron desde que se logueó).
+      if (!rows.length) {
+        return sendError(res, 401, "Unauthorized");
+      }
+      const row = rows[0];
+      req.user.role = row.role;
+      req.tenantId = row.tenant_id ?? null;
+
+      // Si es super_admin y NO está en una ruta de superadmin (/v2/super/...),
+      // ni en /me o /health, bloqueamos el acceso.
+      if (row.role === "super_admin") {
+        const path = req.path;
+        const isSuperRoute = path.startsWith("/v2/super/");
+        const isPublic = path === "/me" || path === "/health" || path === "/auth/logout";
+        if (!isSuperRoute && !isPublic) {
+          return sendError(res, 403, "Super Admin cannot access tenant data routes");
+        }
+        return next();
+      }
+
+      // Todo usuario no-super_admin debe tener tenant_id: es la única forma en que
+      // las rutas de abajo aíslan los datos de cada local. Sin este chequeo, un
+      // usuario sin tenant_id "ve" datos de todos los locales en cualquier endpoint
+      // que arme su filtro como `if (req.tenantId) { ... }`.
+      if (!req.tenantId) {
+        return sendError(res, 403, "User has no tenant assigned");
+      }
+
+      // Verificar que el tenant del usuario esté activo.
+      if (row.tenant_status !== "active") {
         return res.status(403).json({
           message: "Tenant is inactive",
-          suspended_reason: rows[0]?.suspended_reason ?? null,
+          suspended_reason: row.suspended_reason ?? null,
         });
       }
+
       next();
     })
-    .catch(() => sendError(res, 500, "Unexpected error"));
+    .catch((err) => {
+      console.error(err);
+      sendError(res, 500, "Unexpected error");
+    });
 });
 
 app.post("/push/subscribe", async (req, res) => {
