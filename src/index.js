@@ -192,6 +192,7 @@ const createAgendaSchema = z.object({
   owner_name: z.string().min(1),
   service_type_id: z.string().uuid().optional().nullable(),
   payment_method_id: z.string().uuid().optional().nullable(),
+  deposit_payment_method_id: z.string().uuid().optional().nullable(),
   price: z.coerce.number().min(0).optional().nullable(),
   deposit_amount: z.coerce.number().min(0).optional().default(0),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -213,6 +214,7 @@ const createAgendaWithNewPetSchema = z.object({
   duration: z.coerce.number().int().min(1).optional().default(60),
   service_type_id: z.string().uuid().optional().nullable(),
   payment_method_id: z.string().uuid().optional().nullable(),
+  deposit_payment_method_id: z.string().uuid().optional().nullable(),
   price: z.coerce.number().min(0).optional().nullable(),
   deposit_amount: z.coerce.number().min(0).optional().default(0),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -237,6 +239,7 @@ const updateAgendaSchema = z.object({
   owner_name: z.string().min(1).optional(),
   service_type_id: z.string().uuid().optional(),
   payment_method_id: z.string().uuid().optional().nullable(),
+  deposit_payment_method_id: z.string().uuid().optional().nullable(),
   price: z.coerce.number().min(0).optional().nullable(),
   deposit_amount: z.coerce.number().min(0).optional(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -2010,6 +2013,7 @@ app.post("/agenda", async (req, res) => {
     owner_name,
     service_type_id,
     payment_method_id,
+    deposit_payment_method_id,
     price,
     deposit_amount,
     notes,
@@ -2024,13 +2028,13 @@ app.post("/agenda", async (req, res) => {
     const result = await pool.query(
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
-        payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
+        payment_method_id, deposit_payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
         traslado, traslado_direccion, traslado_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        RETURNING *`,
       [
         date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
-        service_type_id, payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
+        service_type_id, payment_method_id ?? null, deposit_payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
         notes ?? null, groomer_id ?? null, status, req.tenantId,
         traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0
       ]
@@ -2056,7 +2060,7 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
   }
 
   const {
-    date, time, duration, service_type_id, payment_method_id, price,
+    date, time, duration, service_type_id, payment_method_id, deposit_payment_method_id, price,
     deposit_amount, notes, groomer_id, status, traslado, traslado_direccion,
     traslado_amount, pet_name, pet_breed, owner_name, owner_phone,
   } = parsed.data;
@@ -2082,13 +2086,13 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
     const turnoResult = await client.query(
       `INSERT INTO agenda_turnos
          (date, time, duration, pet_id, pet_name, breed, owner_name,
-          service_type_id, payment_method_id, price, deposit_amount, notes,
+          service_type_id, payment_method_id, deposit_payment_method_id, price, deposit_amount, notes,
           groomer_id, status, tenant_id, traslado, traslado_direccion, traslado_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING *`,
       [
         date, time, duration, petId, pet_name, pet_breed ?? null, owner_name,
-        service_type_id ?? null, payment_method_id ?? null, price ?? null,
+        service_type_id ?? null, payment_method_id ?? null, deposit_payment_method_id ?? null, price ?? null,
         deposit_amount ?? 0, notes ?? null, groomer_id ?? null, status ?? "reserved",
         tenantId, traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0,
       ]
@@ -2131,6 +2135,7 @@ app.put("/agenda/:id", async (req, res) => {
       "owner_name",
       "service_type_id",
       "payment_method_id",
+      "deposit_payment_method_id",
       "price",
       "deposit_amount",
       "notes",
@@ -4274,11 +4279,13 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
     );
 
     // 2. Señas desde agenda_turnos (status != cancelled)
+    // Usa el método de pago propio de la seña; si no está cargado (turnos viejos), cae al método de pago del saldo.
     const agendaDeposits = await pool.query(
-      `SELECT payment_method_id, SUM(COALESCE(deposit_amount, 0)) AS total
+      `SELECT COALESCE(deposit_payment_method_id, payment_method_id) AS payment_method_id, SUM(COALESCE(deposit_amount, 0)) AS total
        FROM agenda_turnos
-       WHERE date = $1 AND tenant_id = $2 AND status != 'cancelled' AND deposit_amount > 0 AND payment_method_id IS NOT NULL
-       GROUP BY payment_method_id`,
+       WHERE date = $1 AND tenant_id = $2 AND status != 'cancelled' AND deposit_amount > 0
+             AND COALESCE(deposit_payment_method_id, payment_method_id) IS NOT NULL
+       GROUP BY COALESCE(deposit_payment_method_id, payment_method_id)`,
       [queryDate, tenantId]
     );
 
