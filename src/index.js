@@ -156,12 +156,12 @@ const updateCustomerSchema = z.object({
 
 const createPetSchema = z.object({
   name: z.string().min(1),
-  breed: z.string().min(1).optional().nullable(),
+  breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   owner_name: z.string().min(1),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   neutered: z.boolean().optional().default(false),
   behavior: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
-  size: z.string().min(1).optional().nullable(),
+  size: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   age: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   address: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -170,12 +170,12 @@ const createPetSchema = z.object({
 
 const updatePetSchema = z.object({
   name: z.string().min(1).optional(),
-  breed: z.string().min(1).optional().nullable(),
+  breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   owner_name: z.string().min(1).optional(),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   neutered: z.boolean().optional(),
   behavior: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
-  size: z.string().min(1).optional().nullable(),
+  size: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   age: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   address: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -348,7 +348,7 @@ const createServiceRecordSchema = z.object({
   price: z.coerce.number().min(0),
   payment_method_id: z.string().uuid(),
   groomer_id: z.string().uuid().optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const updateServiceRecordSchema = z.object({
@@ -359,23 +359,23 @@ const updateServiceRecordSchema = z.object({
   price: z.coerce.number().min(0).optional(),
   payment_method_id: z.string().uuid().optional(),
   groomer_id: z.string().uuid().optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const createSupplierSchema = z.object({
   name: z.string().min(1),
-  category: z.string().min(1).optional().nullable(),
-  phone: z.string().min(1).optional().nullable(),
+  category: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   payment_method_id: z.string().uuid().optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const updateSupplierSchema = z.object({
   name: z.string().min(1).optional(),
-  category: z.string().min(1).optional().nullable(),
-  phone: z.string().min(1).optional().nullable(),
+  category: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
+  phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   payment_method_id: z.string().uuid().optional().nullable(),
-  notes: z.string().min(1).optional().nullable()
+  notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
 const createSupplierMovementSchema = z.object({
