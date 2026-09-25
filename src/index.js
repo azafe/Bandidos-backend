@@ -1633,6 +1633,50 @@ app.delete("/v2/customers/:id", async (req, res) => {
   }
 });
 
+// "Hoy" en Argentina: el servidor corre en UTC y entre las 21 y las 24 hs
+// CURRENT_DATE ya sería mañana.
+const AR_TODAY_SQL = "(now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date";
+
+// Estadísticas de una mascota a partir de su historial real (agenda_turnos).
+// La usan la lista y la ficha, así que las dos pantallas muestran siempre los
+// mismos números. Definición:
+// - servicio = turno finalizado; los cancelados no suman ni cuentan.
+// - próximo turno = el reservado más cercano desde hoy (hora Argentina).
+// - frecuencia = días promedio entre finalizados, solo con 3 o más.
+// tenantParam es el placeholder ya cargado con el tenant ("$1"), o null.
+function petStatsJoin(tenantParam) {
+  return `
+    LEFT JOIN (
+      SELECT
+        pet_id,
+        COUNT(*)::int AS turnos_count,
+        COUNT(*) FILTER (WHERE status = 'finished')::int AS services_count,
+        COALESCE(SUM(price) FILTER (WHERE status = 'finished'), 0)::numeric(12,2) AS revenue_total,
+        MAX(date) FILTER (WHERE status = 'finished') AS last_visit_date,
+        MIN(date) FILTER (WHERE status = 'finished') AS first_visit_date,
+        MIN(date) FILTER (WHERE status = 'reserved' AND date >= ${AR_TODAY_SQL}) AS next_turno_date,
+        COUNT(*) FILTER (WHERE status = 'reserved' AND date >= ${AR_TODAY_SQL})::int AS upcoming_count,
+        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_count
+      FROM agenda_turnos
+      WHERE pet_id IS NOT NULL
+      ${tenantParam ? `AND tenant_id = ${tenantParam}` : ""}
+      GROUP BY pet_id
+    ) st ON st.pet_id = p.id`;
+}
+
+const PET_STATS_COLUMNS = `
+  COALESCE(st.turnos_count, 0) AS turnos_count,
+  COALESCE(st.services_count, 0) AS services_count,
+  COALESCE(st.services_count, 0) AS pet_service_count,
+  COALESCE(st.revenue_total, 0) AS revenue_total,
+  st.last_visit_date,
+  st.next_turno_date,
+  COALESCE(st.upcoming_count, 0) AS upcoming_count,
+  COALESCE(st.cancelled_count, 0) AS cancelled_count,
+  CASE WHEN st.services_count >= 3
+    THEN ROUND((st.last_visit_date - st.first_visit_date)::numeric / (st.services_count - 1))::int
+  END AS frequency_days`;
+
 app.get("/v2/pets", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
   // Las archivadas quedan fuera salvo que se pidan explícitamente: la ficha
@@ -1648,29 +1692,33 @@ app.get("/v2/pets", async (req, res) => {
   const params = [];
 
   if (req.tenantId) { params.push(req.tenantId); filters.push(`p.tenant_id = $${params.length}`); }
+  const tenantParam = req.tenantId ? "$1" : null;
   if (query) {
     params.push(`%${query}%`);
-    filters.push(`(p.name ILIKE $${params.length} OR p.breed ILIKE $${params.length})`);
+    const textIdx = params.length;
+    const conditions = [
+      `p.name ILIKE $${textIdx}`,
+      `p.breed ILIKE $${textIdx}`,
+      `p.owner_name ILIKE $${textIdx}`,
+    ];
+    // El celular se compara solo por dígitos: "381 688" encuentra "3816882577".
+    const digits = query.replace(/\D/g, "");
+    if (digits.length >= 3) {
+      params.push(`%${digits}%`);
+      conditions.push(`regexp_replace(COALESCE(p.owner_phone, ''), '\\D', '', 'g') LIKE $${params.length}`);
+    }
+    filters.push(`(${conditions.join(" OR ")})`);
   }
   if (archivedFilter === "active") filters.push("p.archived_at IS NULL");
   if (archivedFilter === "only") filters.push("p.archived_at IS NOT NULL");
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-  // El historial real de servicios vive en agenda_turnos (no en la tabla "services",
-  // que está prácticamente vacía). Se cuenta por pet_id, igual que la ficha de la
-  // mascota (PetDetailPage), para que el número coincida en ambas pantallas.
   const sql = `
-    SELECT p.*, COALESCE(at.service_count, 0) AS pet_service_count
+    SELECT p.*, ${PET_STATS_COLUMNS}
     FROM pets p
-    LEFT JOIN (
-      SELECT pet_id, COUNT(*) AS service_count
-      FROM agenda_turnos
-      WHERE pet_id IS NOT NULL
-      ${req.tenantId ? "AND tenant_id = $1" : ""}
-      GROUP BY pet_id
-    ) at ON at.pet_id = p.id
+    ${petStatsJoin(tenantParam)}
     ${whereClause}
-    ORDER BY pet_service_count DESC, p.created_at DESC
+    ORDER BY services_count DESC, p.created_at DESC
   `;
 
   try {
@@ -1684,11 +1732,38 @@ app.get("/v2/pets", async (req, res) => {
 
 app.get("/v2/pets/:id", async (req, res) => {
   const params = [req.params.id];
-  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
+  let tenantParam = null;
+  if (req.tenantId) tenantParam = `$${params.push(req.tenantId)}`;
   try {
-    const result = await pool.query(`SELECT * FROM pets WHERE id = $1${tenantClause}`, params);
+    const result = await pool.query(
+      `SELECT p.*, ${PET_STATS_COLUMNS}
+       FROM pets p
+       ${petStatsJoin(tenantParam)}
+       WHERE p.id = $1${tenantParam ? ` AND p.tenant_id = ${tenantParam}` : ""}`,
+      params
+    );
     if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Historial de la ficha: solo los turnos de esta mascota, del más reciente al
+// más antiguo. Antes la ficha bajaba toda la agenda desde 2020 y filtraba en
+// el navegador.
+app.get("/v2/pets/:id/turnos", async (req, res) => {
+  const params = [req.params.id];
+  const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
+  try {
+    const result = await pool.query(
+      `SELECT * FROM agenda_turnos
+       WHERE pet_id = $1${tenantClause}
+       ORDER BY date DESC, time DESC`,
+      params
+    );
+    res.json(result.rows);
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -1749,6 +1824,20 @@ app.delete("/v2/pets/:id", async (req, res) => {
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
   try {
+    // agenda_turnos.pet_id es ON DELETE SET NULL: sin este chequeo el borrado
+    // pasaba y la mascota perdía todo su historial en silencio.
+    const turnos = await pool.query(
+      `SELECT COUNT(*)::int AS count FROM agenda_turnos WHERE pet_id = $1${tenantClause}`,
+      params
+    );
+    const turnosCount = turnos.rows[0]?.count ?? 0;
+    if (turnosCount > 0) {
+      return sendError(
+        res,
+        409,
+        `No se puede eliminar: la mascota tiene ${turnosCount} ${turnosCount === 1 ? "turno registrado" : "turnos registrados"}. Archivala para sacarla de las listas sin perder el historial.`
+      );
+    }
     const result = await pool.query(`DELETE FROM pets WHERE id = $1${tenantClause}`, params);
     if (result.rowCount === 0) return sendError(res, 404, "Pet not found");
     res.json({ ok: true });
