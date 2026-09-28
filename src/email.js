@@ -14,6 +14,9 @@ export const createEmailClient = () => {
     return {
       sendPasswordResetEmail: async ({ to, resetLink }) => {
         console.info("Password reset email", { to, resetLink });
+      },
+      sendEmail: async ({ to, subject }) => {
+        console.info("Email", { to, subject });
       }
     };
   }
@@ -23,6 +26,9 @@ export const createEmailClient = () => {
     return {
       sendPasswordResetEmail: async ({ to, resetLink }) => {
         console.info("Password reset email", { to, resetLink });
+      },
+      sendEmail: async ({ to, subject }) => {
+        console.info("Email", { to, subject });
       }
     };
   }
@@ -60,6 +66,9 @@ Si no solicitaste el cambio, ignora este correo.`;
         text,
         html
       });
+    },
+    sendEmail: async ({ to, subject, text, html }) => {
+      await transporter.sendMail({ from, to, subject, text, html });
     }
   };
 };

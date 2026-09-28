@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import express from "express";
 import cors from "cors";
 import bcrypt from "bcrypt";
@@ -24,6 +25,26 @@ import {
 } from "./auth/passwordResetService.js";
 import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 import { uploadPhoto } from "./storage.js";
+import {
+  BOOKING_SIZES,
+  addDays,
+  argentinaNow,
+  availabilityQuerySchema,
+  buildReservationEmail,
+  canCancelReservation,
+  phoneKey,
+  reservationSchema,
+  bookingHoursSchema,
+  bookingSettingsSchema,
+  closedDaySchema,
+  computeDaySlots,
+  daysBetween,
+  resolveServiceOffer,
+  sizePricingSchema,
+  slugify,
+  summarizeServiceOffer,
+  weekdayOf
+} from "./booking.js";
 
 const vapidConfigured = process.env.VAPID_EMAIL && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY;
 if (vapidConfigured) {
@@ -84,7 +105,7 @@ app.use(cors({ origin: corsOrigin, allowedHeaders: ["Content-Type", "Authorizati
 app.use(express.json({ limit: "6mb" }));
 
 const statusSchema = z.enum(["active", "inactive"]);
-const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled"]);
+const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled", "no_show"]);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
@@ -322,14 +343,25 @@ const createPetshopStockMovementSchema = z.object({
   note: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
+// Campos de la web de reservas: duración, precio por tamaño y si se ofrece
+// online. Son opcionales para que las pantallas actuales sigan funcionando.
+const serviceTypeBookingFields = {
+  duration_minutes: z.coerce.number().int().min(5).max(600).optional().nullable(),
+  online_enabled: z.boolean().optional(),
+  size_pricing: sizePricingSchema.optional(),
+  description: z.string().trim().max(500).optional().nullable()
+};
+
 const createServiceTypeSchema = z.object({
   name: z.string().min(1),
-  default_price: z.coerce.number().min(0).optional().nullable()
+  default_price: z.coerce.number().min(0).optional().nullable(),
+  ...serviceTypeBookingFields
 });
 
 const updateServiceTypeSchema = z.object({
   name: z.string().min(1).optional(),
-  default_price: z.coerce.number().min(0).optional().nullable()
+  default_price: z.coerce.number().min(0).optional().nullable(),
+  ...serviceTypeBookingFields
 });
 
 const createPaymentMethodSchema = z.object({
@@ -764,6 +796,408 @@ app.post("/auth/reset-password", async (req, res) => {
     }
     console.error(err);
     return sendError(res, 500, "Unexpected error");
+  }
+});
+
+// ── Web de reservas: rutas públicas ─────────────────────────────────────────
+//
+// Van ANTES de app.use(requireAuth): las usa el cliente del local desde la
+// página /reservar/<slug>, sin usuario. Exponen lo mínimo (datos de portada,
+// servicios publicados y horarios libres) y siempre filtran por el tenant que
+// resuelve el slug, nunca por algo que mande el cliente.
+
+const publicBookingLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 60 });
+
+const limitPublicBooking = (req, res, next) => {
+  if (!publicBookingLimiter.consume(getClientIp(req))) {
+    return sendError(res, 429, "Too many requests");
+  }
+  next();
+};
+
+// Local publicado por slug, o null si no existe o el local está suspendido.
+const findBookingTenantBySlug = async (slug) => {
+  const { rows } = await pool.query(
+    `SELECT bs.*, t.name AS tenant_name, t.logo_url, t.primary_color, t.secondary_color
+     FROM booking_settings bs
+     JOIN tenants t ON t.id = bs.tenant_id
+     WHERE bs.slug = $1 AND t.status = 'active'`,
+    [String(slug).toLowerCase()]
+  );
+  return rows[0] ?? null;
+};
+
+const publicServiceView = (serviceType) => ({
+  id: serviceType.id,
+  name: serviceType.name,
+  description: serviceType.description ?? null,
+  ...summarizeServiceOffer(serviceType),
+  sizes: Object.fromEntries(BOOKING_SIZES.map((size) => [size, resolveServiceOffer(serviceType, size)]))
+});
+
+app.get("/public/booking/:slug", limitPublicBooking, async (req, res) => {
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking) return sendError(res, 404, "Booking page not found");
+
+    const business = {
+      name: booking.tenant_name,
+      logo_url: booking.logo_url,
+      primary_color: booking.primary_color,
+      secondary_color: booking.secondary_color,
+      address: booking.address,
+      whatsapp: booking.whatsapp
+    };
+
+    // Apagada: la página muestra el aviso y el botón de WhatsApp.
+    if (!booking.enabled) return res.json({ enabled: false, business });
+
+    const [hours, services] = await Promise.all([
+      pool.query(
+        `SELECT weekday, to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time
+         FROM booking_hours WHERE tenant_id = $1 ORDER BY weekday, start_time`,
+        [booking.tenant_id]
+      ),
+      pool.query(
+        `SELECT id, name, description, default_price, duration_minutes, size_pricing
+         FROM service_types WHERE tenant_id = $1 AND online_enabled = true ORDER BY name`,
+        [booking.tenant_id]
+      )
+    ]);
+
+    res.json({
+      enabled: true,
+      business,
+      rules: {
+        min_notice_minutes: booking.min_notice_minutes,
+        max_days_ahead: booking.max_days_ahead,
+        cancel_hours: booking.cancel_hours,
+        cancellation_policy: booking.cancellation_policy
+      },
+      hours: hours.rows,
+      sizes: BOOKING_SIZES,
+      services: services.rows.map(publicServiceView)
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Datos que necesita el motor de horarios para un rango de fechas. `db` es el
+// pool o el cliente de una transacción (al confirmar una reserva).
+const loadAvailabilityData = async (db, tenantId, start, end) => {
+  const [hours, closed, turnos, blocks] = await Promise.all([
+    db.query(`SELECT weekday, start_time, end_time FROM booking_hours WHERE tenant_id = $1`, [tenantId]),
+    db.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM booking_closed_days
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
+      [tenantId, start, end]
+    ),
+    db.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date, time, duration FROM agenda_turnos
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3 AND status IN ('reserved', 'finished')`,
+      [tenantId, start, end]
+    ),
+    db.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date, start_time, end_time FROM agenda_blocks
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
+      [tenantId, start, end]
+    )
+  ]);
+  return {
+    hours: hours.rows,
+    closedDates: new Set(closed.rows.map((r) => r.date)),
+    turnos: turnos.rows,
+    blocks: blocks.rows
+  };
+};
+
+const slotsForDate = (booking, data, date, duration, now) => {
+  const weekday = weekdayOf(date);
+  return computeDaySlots({
+    date,
+    ranges: data.hours.filter((h) => h.weekday === weekday),
+    closed: data.closedDates.has(date),
+    appointments: data.turnos.filter((t) => t.date === date),
+    blocks: data.blocks.filter((b) => b.date === date),
+    capacity: booking.capacity,
+    interval: booking.slot_interval,
+    duration,
+    now,
+    minNoticeMinutes: booking.min_notice_minutes,
+    maxDaysAhead: booking.max_days_ahead
+  });
+};
+
+const findOnlineService = async (db, serviceTypeId, tenantId) => {
+  const { rows } = await db.query(
+    `SELECT id, name, default_price, duration_minutes, size_pricing
+     FROM service_types WHERE id = $1 AND tenant_id = $2 AND online_enabled = true`,
+    [serviceTypeId, tenantId]
+  );
+  return rows[0] ?? null;
+};
+
+// Horarios libres día por día para un servicio y un tamaño.
+app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, res) => {
+  const parsed = availabilityQuerySchema.safeParse(req.query);
+  if (!parsed.success) return sendError(res, 400, "Invalid query");
+  const { service_type_id, size, from, days } = parsed.data;
+
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking || !booking.enabled) return sendError(res, 404, "Booking page not found");
+
+    const service = await findOnlineService(pool, service_type_id, booking.tenant_id);
+    if (!service) return sendError(res, 404, "Service not found");
+    const offer = resolveServiceOffer(service, size);
+
+    // El rango pedido se recorta a [hoy, hoy + anticipación máxima].
+    const now = argentinaNow();
+    const start = from && from > now.date ? from : now.date;
+    const lastAllowed = addDays(now.date, booking.max_days_ahead);
+    const requestedEnd = addDays(start, days - 1);
+    const end = requestedEnd < lastAllowed ? requestedEnd : lastAllowed;
+
+    const response = {
+      service: { id: service.id, name: service.name },
+      size: size ?? null,
+      price: offer.price,
+      duration: offer.duration,
+      days: []
+    };
+    if (end < start) return res.json(response);
+
+    const data = await loadAvailabilityData(pool, booking.tenant_id, start, end);
+    for (let i = 0; i <= daysBetween(start, end); i += 1) {
+      const date = addDays(start, i);
+      response.days.push({ date, slots: slotsForDate(booking, data, date, offer.duration, now) });
+    }
+    res.json(response);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Crear una reserva: más estricto que la consulta, para frenar abusos.
+const reservationIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
+// Turnos online futuros que puede tener reservados un mismo celular.
+const MAX_ACTIVE_ONLINE_PER_PHONE = 3;
+
+// Link que el cliente usa para ver o cancelar su turno. Sale de la URL del
+// frontend (PUBLIC_APP_URL, o el origen de PASSWORD_RESET_URL_BASE).
+const publicAppBaseUrl = () => {
+  const explicit = process.env.PUBLIC_APP_URL;
+  if (explicit) return explicit.replace(/\/+$/, "");
+  try {
+    return passwordResetUrlBase ? new URL(passwordResetUrlBase).origin : null;
+  } catch {
+    return null;
+  }
+};
+
+const reservationView = (turno, booking, now) => ({
+  date: turno.date,
+  time: String(turno.time).slice(0, 5),
+  duration: turno.duration,
+  status: turno.status,
+  pet_name: turno.pet_name,
+  owner_name: turno.owner_name,
+  service_name: turno.service_name ?? null,
+  price: turno.price !== null && turno.price !== undefined ? Number(turno.price) : null,
+  can_cancel: canCancelReservation(turno, booking.cancel_hours, now),
+  cancel_hours: booking.cancel_hours,
+  business: {
+    name: booking.tenant_name,
+    logo_url: booking.logo_url,
+    address: booking.address,
+    whatsapp: booking.whatsapp
+  }
+});
+
+app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, res) => {
+  if (!reservationIpLimiter.consume(getClientIp(req))) return sendError(res, 429, "Too many requests");
+  const parsed = reservationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+  const input = parsed.data;
+
+  let booking;
+  try {
+    booking = await findBookingTenantBySlug(req.params.slug);
+  } catch (err) {
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
+  }
+  if (!booking || !booking.enabled) return sendError(res, 404, "Booking page not found");
+  const tenantId = booking.tenant_id;
+  const phone = phoneKey(input.phone);
+
+  const client = await pool.connect();
+  let turno;
+  let service;
+  try {
+    await client.query("BEGIN");
+    // Serializa las reservas del mismo local y día: dos clientes no pueden
+    // quedarse con el último cupo al mismo tiempo.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`${tenantId}:${input.date}`]);
+
+    service = await findOnlineService(client, input.service_type_id, tenantId);
+    if (!service) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Service not found");
+    }
+    const offer = resolveServiceOffer(service, input.size);
+
+    const now = argentinaNow();
+    const data = await loadAvailabilityData(client, tenantId, input.date, input.date);
+    if (!slotsForDate(booking, data, input.date, offer.duration, now).includes(input.time)) {
+      await client.query("ROLLBACK");
+      return sendError(res, 409, "Slot not available");
+    }
+
+    const active = await client.query(
+      `SELECT COUNT(*)::int AS n
+       FROM agenda_turnos a
+       JOIN pets p ON p.id = a.pet_id
+       WHERE a.tenant_id = $1 AND a.source = 'online' AND a.status = 'reserved'
+         AND a.date >= $2 AND right(regexp_replace(coalesce(p.owner_phone, ''), '\\D', '', 'g'), 10) = $3`,
+      [tenantId, now.date, phone]
+    );
+    if (active.rows[0].n >= MAX_ACTIVE_ONLINE_PER_PHONE) {
+      await client.query("ROLLBACK");
+      return sendError(res, 429, "Too many active reservations");
+    }
+
+    // Se asocia a la mascota existente si coinciden celular y nombre; si no,
+    // se crea una nueva. Al cliente no se le muestra nada de lo que ya hay.
+    const existing = await client.query(
+      `SELECT id FROM pets
+       WHERE tenant_id = $1 AND archived_at IS NULL
+         AND lower(trim(name)) = lower(trim($2))
+         AND right(regexp_replace(coalesce(owner_phone, ''), '\\D', '', 'g'), 10) = $3
+       ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, input.pet_name, phone]
+    );
+    let petId = existing.rows[0]?.id ?? null;
+    if (!petId) {
+      const created = await client.query(
+        `INSERT INTO pets (name, breed, owner_name, owner_phone, size, tenant_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [input.pet_name, input.breed ?? null, input.owner_name, input.phone, input.size, tenantId]
+      );
+      petId = created.rows[0].id;
+    }
+
+    const notes = [
+      input.notes,
+      input.email ? `Email: ${input.email}` : null,
+      `Reservado online · tamaño ${input.size}`
+    ].filter(Boolean).join("\n");
+
+    const inserted = await client.query(
+      `INSERT INTO agenda_turnos
+         (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
+          price, deposit_amount, notes, status, tenant_id, source, cancel_token)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, 'reserved', $11, 'online', $12)
+       RETURNING id, to_char(date, 'YYYY-MM-DD') AS date, time, duration, status, pet_name, owner_name, price, cancel_token`,
+      [
+        input.date, input.time, offer.duration, petId, input.pet_name, input.breed ?? null, input.owner_name,
+        service.id, offer.price, notes, tenantId, crypto.randomBytes(24).toString("hex")
+      ]
+    );
+    turno = inserted.rows[0];
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+
+  const view = reservationView({ ...turno, service_name: service.name }, booking, argentinaNow());
+  res.status(201).json({ ...view, token: turno.cancel_token });
+
+  sendPushToTenant(tenantId, {
+    title: "🌐 Nueva reserva online",
+    body: `${formatPushDate(`${turno.date}T12:00:00Z`)} · ${view.time} · ${turno.pet_name} (${service.name})`
+  });
+
+  if (input.email) {
+    const base = publicAppBaseUrl();
+    const email = buildReservationEmail({
+      businessName: booking.tenant_name,
+      address: booking.address,
+      petName: turno.pet_name,
+      serviceName: service.name,
+      date: turno.date,
+      time: view.time,
+      price: view.price,
+      manageUrl: base ? `${base}/reservar/${booking.slug}/turno/${turno.cancel_token}` : null
+    });
+    emailClient.sendEmail({ to: input.email, ...email }).catch((err) => {
+      console.error("[booking] No se pudo enviar el email de confirmación:", err);
+    });
+  }
+});
+
+const findReservationByToken = async (tenantId, token) => {
+  if (!/^[a-f0-9]{48}$/.test(token)) return null;
+  const { rows } = await pool.query(
+    `SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date, a.time, a.duration, a.status, a.pet_name,
+            a.owner_name, a.price, st.name AS service_name
+     FROM agenda_turnos a
+     LEFT JOIN service_types st ON st.id = a.service_type_id
+     WHERE a.tenant_id = $1 AND a.cancel_token = $2`,
+    [tenantId, token]
+  );
+  return rows[0] ?? null;
+};
+
+app.get("/public/booking/:slug/reservations/:token", limitPublicBooking, async (req, res) => {
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking) return sendError(res, 404, "Reservation not found");
+    const turno = await findReservationByToken(booking.tenant_id, req.params.token);
+    if (!turno) return sendError(res, 404, "Reservation not found");
+    res.json(reservationView(turno, booking, argentinaNow()));
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/public/booking/:slug/reservations/:token/cancel", limitPublicBooking, async (req, res) => {
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking) return sendError(res, 404, "Reservation not found");
+    const turno = await findReservationByToken(booking.tenant_id, req.params.token);
+    if (!turno) return sendError(res, 404, "Reservation not found");
+
+    const now = argentinaNow();
+    if (!canCancelReservation(turno, booking.cancel_hours, now)) {
+      return sendError(res, 409, "Reservation can no longer be cancelled");
+    }
+    // El WHERE por status evita pisar un cambio hecho desde la agenda en el medio.
+    const updated = await pool.query(
+      `UPDATE agenda_turnos SET status = 'cancelled'
+       WHERE id = $1 AND tenant_id = $2 AND status = 'reserved'`,
+      [turno.id, booking.tenant_id]
+    );
+    if (updated.rowCount === 0) return sendError(res, 409, "Reservation can no longer be cancelled");
+
+    res.json(reservationView({ ...turno, status: "cancelled" }, booking, now));
+    sendPushToTenant(booking.tenant_id, {
+      title: "Turno cancelado por el cliente",
+      body: `${formatPushDate(`${turno.date}T12:00:00Z`)} · ${String(turno.time).slice(0, 5)} · ${turno.pet_name}`
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
   }
 });
 
@@ -1656,7 +2090,8 @@ function petStatsJoin(tenantParam) {
         MIN(date) FILTER (WHERE status = 'finished') AS first_visit_date,
         MIN(date) FILTER (WHERE status = 'reserved' AND date >= ${AR_TODAY_SQL}) AS next_turno_date,
         COUNT(*) FILTER (WHERE status = 'reserved' AND date >= ${AR_TODAY_SQL})::int AS upcoming_count,
-        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_count
+        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_count,
+        COUNT(*) FILTER (WHERE status = 'no_show')::int AS no_show_count
       FROM agenda_turnos
       WHERE pet_id IS NOT NULL
       ${tenantParam ? `AND tenant_id = ${tenantParam}` : ""}
@@ -2071,7 +2506,9 @@ app.get("/agenda/counts", async (req, res) => {
               COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE status = 'finished')::int AS finished,
               COUNT(*) FILTER (WHERE status = 'reserved')::int AS reserved,
-              COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled
+              COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
+              COUNT(*) FILTER (WHERE status = 'no_show')::int AS no_show,
+              COUNT(*) FILTER (WHERE source = 'online')::int AS online
        FROM agenda_turnos
        WHERE date BETWEEN $1 AND $2${tenantClause}
        GROUP BY date
@@ -2334,6 +2771,63 @@ app.post("/agenda/:id/photo", async (req, res) => {
   }
 });
 
+// ── Bloqueos de horario (la web de reservas no ofrece esas franjas) ─────────
+
+const agendaBlockSchema = z
+  .object({
+    date: dateSchema,
+    start_time: timeSchema,
+    end_time: timeSchema,
+    reason: z.string().trim().max(200).optional().nullable()
+  })
+  .refine((b) => b.start_time < b.end_time, { message: "start_time must be before end_time" });
+
+const AGENDA_BLOCK_COLUMNS = `id, to_char(date, 'YYYY-MM-DD') AS date,
+  to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time, reason`;
+
+app.get("/v2/agenda/blocks", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const from = dateSchema.safeParse(req.query.from);
+  const to = dateSchema.safeParse(req.query.to);
+  if (!from.success || !to.success) return sendError(res, 400, "Invalid date range");
+  try {
+    const result = await pool.query(
+      `SELECT ${AGENDA_BLOCK_COLUMNS} FROM agenda_blocks
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3 ORDER BY date, start_time`,
+      [req.tenantId, from.data, to.data]
+    );
+    res.json(result.rows);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.post("/v2/agenda/blocks", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = agendaBlockSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { date, start_time, end_time, reason } = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO agenda_blocks (tenant_id, date, start_time, end_time, reason, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${AGENDA_BLOCK_COLUMNS}`,
+      [req.tenantId, date, start_time, end_time, reason ?? null, req.user?.sub ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.delete("/v2/agenda/blocks/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  if (!z.string().uuid().safeParse(req.params.id).success) return sendError(res, 404, "Block not found");
+  try {
+    const result = await pool.query(
+      `DELETE FROM agenda_blocks WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Block not found");
+    res.json({ ok: true });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
 app.get("/v2/service-types", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const filters = [];
@@ -2361,11 +2855,16 @@ app.post("/v2/service-types", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createServiceTypeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
-  const { name, default_price } = parsed.data;
+  const { name, default_price, duration_minutes, online_enabled, size_pricing, description } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO service_types (name, default_price, tenant_id) VALUES ($1, $2, $3) RETURNING *`,
-      [name, default_price ?? null, req.tenantId]
+      `INSERT INTO service_types
+         (name, default_price, duration_minutes, online_enabled, size_pricing, description, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        name, default_price ?? null, duration_minutes ?? null, online_enabled ?? false,
+        size_pricing ?? {}, description ?? null, req.tenantId
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
@@ -2375,7 +2874,10 @@ app.put("/v2/service-types/:id", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceTypeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
-  const { fields, values, idx } = buildUpdate(["name", "default_price"], parsed.data);
+  const { fields, values, idx } = buildUpdate(
+    ["name", "default_price", "duration_minutes", "online_enabled", "size_pricing", "description"],
+    parsed.data
+  );
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
   const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
@@ -2395,6 +2897,168 @@ app.delete("/v2/service-types/:id", async (req, res) => {
   try {
     const result = await pool.query(`DELETE FROM service_types WHERE id = $1${tenantClause}`, params);
     if (result.rowCount === 0) return sendError(res, 404, "Service type not found");
+    res.json({ ok: true });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+// ── Web de reservas: configuración del local ────────────────────────────────
+
+const BOOKING_SETTINGS_FIELDS = [
+  "enabled", "slug", "address", "whatsapp", "cancellation_policy",
+  "capacity", "slot_interval", "min_notice_minutes", "max_days_ahead", "cancel_hours"
+];
+
+const BOOKING_SETTINGS_DEFAULTS = {
+  enabled: false,
+  slug: null,
+  address: null,
+  whatsapp: null,
+  cancellation_policy: null,
+  capacity: 1,
+  slot_interval: 30,
+  min_notice_minutes: 120,
+  max_days_ahead: 30,
+  cancel_hours: 24
+};
+
+const loadBookingConfig = async (tenantId) => {
+  const [settings, tenant, hours, closedDays] = await Promise.all([
+    pool.query(`SELECT * FROM booking_settings WHERE tenant_id = $1`, [tenantId]),
+    pool.query(`SELECT name FROM tenants WHERE id = $1`, [tenantId]),
+    pool.query(
+      `SELECT id, weekday, to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time
+       FROM booking_hours WHERE tenant_id = $1 ORDER BY weekday, start_time`,
+      [tenantId]
+    ),
+    pool.query(
+      `SELECT id, to_char(date, 'YYYY-MM-DD') AS date, reason FROM booking_closed_days
+       WHERE tenant_id = $1 AND date >= $2 ORDER BY date`,
+      [tenantId, argentinaNow().date]
+    )
+  ]);
+
+  const saved = settings.rows[0];
+  const base = saved
+    ? Object.fromEntries(BOOKING_SETTINGS_FIELDS.map((f) => [f, saved[f]]))
+    : { ...BOOKING_SETTINGS_DEFAULTS };
+
+  return {
+    settings: base,
+    // Sugerencia de link para el primer guardado, armada con el nombre del local.
+    suggested_slug: base.slug ?? slugify(tenant.rows[0]?.name ?? ""),
+    hours: hours.rows,
+    closed_days: closedDays.rows
+  };
+};
+
+app.get("/v2/booking/settings", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    res.json(await loadBookingConfig(req.tenantId));
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+// Link público para mostrar en la agenda: lo ve todo el equipo, no solo admin.
+app.get("/v2/booking/link", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `SELECT slug, enabled FROM booking_settings WHERE tenant_id = $1`,
+      [req.tenantId]
+    );
+    const row = result.rows[0];
+    res.json({ slug: row?.slug ?? null, enabled: Boolean(row?.enabled && row?.slug) });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.put("/v2/booking/settings", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = bookingSettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+  const data = parsed.data;
+
+  try {
+    const current = await pool.query(`SELECT slug FROM booking_settings WHERE tenant_id = $1`, [req.tenantId]);
+    const finalSlug = data.slug ?? current.rows[0]?.slug ?? null;
+    // Sin link no hay página: no se puede prender la web sin elegir uno.
+    if (data.enabled && !finalSlug) return sendError(res, 400, "A slug is required to enable online booking");
+
+    const fields = BOOKING_SETTINGS_FIELDS.filter((f) => data[f] !== undefined);
+    const values = fields.map((f) => data[f]);
+    const insertCols = ["tenant_id", ...fields];
+    const placeholders = insertCols.map((_, i) => `$${i + 1}`);
+    const updates = [...fields.map((f) => `${f} = EXCLUDED.${f}`), "updated_at = now()"];
+
+    await pool.query(
+      `INSERT INTO booking_settings (${insertCols.join(", ")})
+       VALUES (${placeholders.join(", ")})
+       ON CONFLICT (tenant_id) DO UPDATE SET ${updates.join(", ")}`,
+      [req.tenantId, ...values]
+    );
+    res.json(await loadBookingConfig(req.tenantId));
+  } catch (err) {
+    if (err.code === "23505") return sendError(res, 409, "Slug already taken");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Reemplaza el horario semanal completo (lo que se ve en la pantalla).
+app.put("/v2/booking/hours", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = bookingHoursSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM booking_hours WHERE tenant_id = $1`, [req.tenantId]);
+    for (const h of parsed.data.hours) {
+      await client.query(
+        `INSERT INTO booking_hours (tenant_id, weekday, start_time, end_time) VALUES ($1, $2, $3, $4)`,
+        [req.tenantId, h.weekday, h.start_time, h.end_time]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+
+  try {
+    res.json(await loadBookingConfig(req.tenantId));
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.post("/v2/booking/closed-days", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = closedDaySchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  try {
+    const result = await pool.query(
+      `INSERT INTO booking_closed_days (tenant_id, date, reason) VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, date) DO UPDATE SET reason = EXCLUDED.reason
+       RETURNING id, to_char(date, 'YYYY-MM-DD') AS date, reason`,
+      [req.tenantId, parsed.data.date, parsed.data.reason ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.delete("/v2/booking/closed-days/:id", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  if (!z.string().uuid().safeParse(req.params.id).success) return sendError(res, 404, "Closed day not found");
+  try {
+    const result = await pool.query(
+      `DELETE FROM booking_closed_days WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Closed day not found");
     res.json({ ok: true });
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
