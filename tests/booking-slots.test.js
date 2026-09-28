@@ -279,3 +279,18 @@ test("el email de confirmación escapa lo que escribió el cliente", () => {
   assert.ok(email.text.includes("martes 6 de octubre a las 10:00"));
   assert.ok(email.text.includes("https://app.test/reservar/bandidos/turno/abc"));
 });
+
+test("fecha límite para cancelar, estado del día y horarios alternativos", async () => {
+  const { cancelDeadline, dayStatus, nearestSlots } = await import("../src/booking.js");
+  assert.deepEqual(cancelDeadline({ date: "2026-09-30", time: "09:00" }, 24), { date: "2026-09-29", time: "09:00" });
+  assert.deepEqual(cancelDeadline({ date: "2026-10-01", time: "01:00" }, 2), { date: "2026-09-30", time: "23:00" });
+  assert.deepEqual(cancelDeadline({ date: "2026-10-01", time: "10:00" }, 0), { date: "2026-10-01", time: "10:00" });
+
+  assert.equal(dayStatus({ closed: true, hasRanges: true, slots: ["09:00"] }), "closed");
+  assert.equal(dayStatus({ closed: false, hasRanges: false, slots: [] }), "closed");
+  assert.equal(dayStatus({ closed: false, hasRanges: true, slots: [] }), "full");
+  assert.equal(dayStatus({ closed: false, hasRanges: true, slots: ["09:00"] }), "open");
+
+  assert.deepEqual(nearestSlots(["08:00", "09:30", "11:00", "15:00", "18:00"], "09:00"), ["08:00", "09:30", "11:00"]);
+  assert.deepEqual(nearestSlots([], "09:00"), []);
+});

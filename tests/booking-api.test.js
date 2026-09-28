@@ -304,7 +304,7 @@ test("web de reservas: rutas públicas y configuración", async (t) => {
     assert.equal(status, 200);
     assert.equal(body.price, 15000);
     assert.equal(body.duration, 60);
-    assert.deepEqual(body.days, [{ date: TARGET, slots: ["09:00", "11:00"] }]);
+    assert.deepEqual(body.days, [{ date: TARGET, status: "open", slots: ["09:00", "11:00"] }]);
   });
 
   await t.test("disponibilidad sin tamaño: reserva la duración más larga y no fija precio", async () => {

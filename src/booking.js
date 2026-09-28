@@ -350,6 +350,35 @@ export function canCancelReservation(turno, cancelHours, now) {
   return minutesUntil(turno, now) >= cancelHours * 60;
 }
 
+// Último momento en que el cliente puede cancelar solo: el turno menos
+// `cancelHours` horas. Devuelve { date, time } en hora de Argentina.
+export function cancelDeadline({ date, time }, cancelHours) {
+  let minutes = timeToMinutes(time) - cancelHours * 60;
+  let days = 0;
+  while (minutes < 0) {
+    minutes += 1440;
+    days -= 1;
+  }
+  return { date: addDays(date, days), time: minutesToTime(minutes) };
+}
+
+// Estado de un día para la tira de días: cerrado (no se atiende), completo
+// (se atiende pero no queda lugar) o con lugar.
+export function dayStatus({ closed, hasRanges, slots }) {
+  if (closed || !hasRanges) return "closed";
+  return slots.length ? "open" : "full";
+}
+
+// Hasta `count` horarios libres alternativos, los más cercanos al pedido.
+export function nearestSlots(slots, wanted, count = 3) {
+  const target = timeToMinutes(wanted);
+  return [...slots]
+    .filter((s) => s !== wanted)
+    .sort((a, b) => Math.abs(timeToMinutes(a) - target) - Math.abs(timeToMinutes(b) - target) || a.localeCompare(b))
+    .slice(0, count)
+    .sort();
+}
+
 const escapeHtml = (text) =>
   String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 

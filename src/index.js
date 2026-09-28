@@ -32,6 +32,9 @@ import {
   availabilityQuerySchema,
   buildReservationEmail,
   canCancelReservation,
+  cancelDeadline,
+  dayStatus,
+  nearestSlots,
   phoneKey,
   reservationSchema,
   bookingHoursSchema,
@@ -973,7 +976,13 @@ app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, re
     const data = await loadAvailabilityData(pool, booking.tenant_id, start, end);
     for (let i = 0; i <= daysBetween(start, end); i += 1) {
       const date = addDays(start, i);
-      response.days.push({ date, slots: slotsForDate(booking, data, date, offer.duration, now) });
+      const slots = slotsForDate(booking, data, date, offer.duration, now);
+      const status = dayStatus({
+        closed: data.closedDates.has(date),
+        hasRanges: data.hours.some((h) => h.weekday === weekdayOf(date)),
+        slots
+      });
+      response.days.push({ date, status, slots });
     }
     res.json(response);
   } catch (err) {
@@ -999,6 +1008,10 @@ const publicAppBaseUrl = () => {
   }
 };
 
+const pickRange = ({ price_from, price_to, duration_min, duration_max }) => ({
+  price_from, price_to, duration_min, duration_max
+});
+
 const reservationView = (turno, booking, now) => ({
   date: turno.date,
   time: String(turno.time).slice(0, 5),
@@ -1007,12 +1020,16 @@ const reservationView = (turno, booking, now) => ({
   pet_name: turno.pet_name,
   owner_name: turno.owner_name,
   service_name: turno.service_name ?? null,
+  // Rango del servicio: el precio final lo define el local según el tamaño.
+  ...(turno.size_pricing !== undefined ? pickRange(summarizeServiceOffer(turno)) : {}),
   price: turno.price !== null && turno.price !== undefined ? Number(turno.price) : null,
   can_cancel: canCancelReservation(turno, booking.cancel_hours, now),
+  cancel_until: cancelDeadline({ date: turno.date, time: String(turno.time).slice(0, 5) }, booking.cancel_hours),
   cancel_hours: booking.cancel_hours,
   business: {
     name: booking.tenant_name,
     logo_url: booking.logo_url,
+    primary_color: booking.primary_color,
     address: booking.address,
     whatsapp: booking.whatsapp
   }
@@ -1055,9 +1072,16 @@ app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, r
 
     const now = argentinaNow();
     const data = await loadAvailabilityData(client, tenantId, input.date, input.date);
-    if (!slotsForDate(booking, data, input.date, offer.duration, now).includes(input.time)) {
+    const freeSlots = slotsForDate(booking, data, input.date, offer.duration, now);
+    if (!freeSlots.includes(input.time)) {
       await client.query("ROLLBACK");
-      return sendError(res, 409, "Slot not available");
+      // Horarios cercanos del mismo día para ofrecerle al cliente sin volver atrás.
+      return res.status(409).json({
+        status: 409,
+        message: "Slot not available",
+        code: "SLOT_TAKEN",
+        alternatives: nearestSlots(freeSlots, input.time)
+      });
     }
 
     const active = await client.query(
@@ -1120,7 +1144,7 @@ app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, r
     client.release();
   }
 
-  const view = reservationView({ ...turno, service_name: service.name }, booking, argentinaNow());
+  const view = reservationView({ ...turno, service_name: service.name, default_price: service.default_price, duration_minutes: service.duration_minutes, size_pricing: service.size_pricing }, booking, argentinaNow());
   res.status(201).json({ ...view, token: turno.cancel_token });
 
   sendPushToTenant(tenantId, {
@@ -1150,7 +1174,8 @@ const findReservationByToken = async (tenantId, token) => {
   if (!/^[a-f0-9]{48}$/.test(token)) return null;
   const { rows } = await pool.query(
     `SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date, a.time, a.duration, a.status, a.pet_name,
-            a.owner_name, a.price, st.name AS service_name
+            a.owner_name, a.price, st.name AS service_name,
+            st.default_price, st.duration_minutes, st.size_pricing
      FROM agenda_turnos a
      LEFT JOIN service_types st ON st.id = a.service_type_id
      WHERE a.tenant_id = $1 AND a.cancel_token = $2`,
