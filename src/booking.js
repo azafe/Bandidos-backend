@@ -287,3 +287,88 @@ export const availabilityQuerySchema = z.object({
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   days: z.coerce.number().int().min(1).max(31).default(14)
 });
+
+// ── Reserva del cliente ────────────────────────────────────────────────────
+
+const requiredText = (max) => z.string().trim().min(1).max(max);
+
+export const reservationSchema = z.object({
+  service_type_id: z.string().uuid(),
+  size: z.enum(BOOKING_SIZES),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  time: hhmm,
+  owner_name: requiredText(120),
+  phone: z
+    .string()
+    .trim()
+    .max(40)
+    .refine((v) => phoneKey(v).length >= 8, { message: "Invalid phone" }),
+  pet_name: requiredText(80),
+  breed: optionalText(80),
+  email: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+    z.string().trim().email().max(160).nullable().optional()
+  ),
+  notes: optionalText(500),
+  accept_policy: z.literal(true),
+  // Campo trampa: invisible para una persona, los bots lo completan.
+  website: z.string().max(0).optional()
+});
+
+// Clave para comparar celulares cargados de formas distintas
+// ("+54 9 381 555-1234", "3815551234", "0381 15 555 1234"): los últimos 10
+// dígitos, que en Argentina son característica + número.
+export function phoneKey(phone) {
+  const digits = String(phone ?? "").replace(/\D/g, "");
+  return digits.slice(-10);
+}
+
+// Minutos que faltan para el turno, medidos en hora de Argentina.
+export function minutesUntil({ date, time }, now) {
+  return daysBetween(now.date, date) * 1440 + timeToMinutes(time) - now.minutes;
+}
+
+// El cliente puede cancelar solo si el turno sigue reservado y falta al menos
+// `cancelHours` horas.
+export function canCancelReservation(turno, cancelHours, now) {
+  if (turno.status !== "reserved") return false;
+  return minutesUntil(turno, now) >= cancelHours * 60;
+}
+
+const escapeHtml = (text) =>
+  String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function formatLongDate(date) {
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("es-AR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    timeZone: "UTC"
+  }).replace(",", "");
+}
+
+// Email de confirmación para el cliente (texto y HTML).
+export function buildReservationEmail({ businessName, address, petName, serviceName, date, time, price, manageUrl }) {
+  const when = `${formatLongDate(date)} a las ${time}`;
+  const priceText = price !== null && price !== undefined ? `$${Number(price).toLocaleString("es-AR")}` : null;
+  const lines = [
+    `¡Tu turno en ${businessName} quedó reservado!`,
+    "",
+    `Mascota: ${petName}`,
+    `Servicio: ${serviceName}`,
+    `Cuándo: ${when}`,
+    address ? `Dónde: ${address}` : null,
+    priceText ? `Precio: ${priceText}` : null,
+    "",
+    manageUrl ? `Si no podés venir, cancelalo desde acá: ${manageUrl}` : null
+  ].filter((l) => l !== null);
+
+  const html = `<p><strong>¡Tu turno en ${escapeHtml(businessName)} quedó reservado!</strong></p>
+<p>Mascota: ${escapeHtml(petName)}<br>Servicio: ${escapeHtml(serviceName)}<br>Cuándo: ${escapeHtml(when)}${
+    address ? `<br>Dónde: ${escapeHtml(address)}` : ""
+  }${priceText ? `<br>Precio: ${escapeHtml(priceText)}` : ""}</p>${
+    manageUrl ? `<p>Si no podés venir, <a href="${escapeHtml(manageUrl)}">cancelá tu turno acá</a>.</p>` : ""
+  }`;
+
+  return { subject: `Turno reservado en ${businessName}`, text: lines.join("\n"), html };
+}

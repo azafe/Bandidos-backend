@@ -208,3 +208,55 @@ test("valida la configuración y el precio por tamaño", () => {
   assert.equal(sizePricingSchema.safeParse({ chico: { price: 1000, duration: 45 } }).success, true);
   assert.equal(sizePricingSchema.safeParse({ enorme: { price: 1 } }).success, false);
 });
+
+const { phoneKey, canCancelReservation, reservationSchema, buildReservationEmail } = await import("../src/booking.js");
+
+test("phoneKey reconoce el mismo celular escrito de formas distintas", () => {
+  assert.equal(phoneKey("+54 9 381 555-1234"), "3815551234");
+  assert.equal(phoneKey("381-5551234"), "3815551234");
+  assert.equal(phoneKey("0381 5551234"), "3815551234");
+});
+
+test("el cliente puede cancelar hasta `cancel_hours` antes y solo si sigue reservado", () => {
+  const now = { date: "2026-10-05", minutes: 10 * 60 };
+  const turno = { date: "2026-10-06", time: "10:00:00", status: "reserved" };
+  assert.equal(canCancelReservation(turno, 24, now), true); // faltan 24 h justas
+  assert.equal(canCancelReservation(turno, 25, now), false);
+  assert.equal(canCancelReservation({ ...turno, status: "cancelled" }, 0, now), false);
+  assert.equal(canCancelReservation({ ...turno, date: "2026-10-05", time: "09:00" }, 0, now), false); // ya pasó
+});
+
+test("valida la reserva: política aceptada, celular con dígitos y campo trampa vacío", () => {
+  const base = {
+    service_type_id: "6f1f4a57-5f76-4c86-9d16-3b8e1d7d1a11",
+    size: "chico",
+    date: "2026-10-06",
+    time: "10:00",
+    owner_name: "Juana",
+    phone: "381 555-1234",
+    pet_name: "Rocco",
+    accept_policy: true
+  };
+  assert.equal(reservationSchema.safeParse(base).success, true);
+  assert.equal(reservationSchema.safeParse({ ...base, email: "" }).data.email, null);
+  assert.equal(reservationSchema.safeParse({ ...base, accept_policy: false }).success, false);
+  assert.equal(reservationSchema.safeParse({ ...base, phone: "abc" }).success, false);
+  assert.equal(reservationSchema.safeParse({ ...base, website: "http://spam" }).success, false);
+  assert.equal(reservationSchema.safeParse({ ...base, size: "enorme" }).success, false);
+});
+
+test("el email de confirmación escapa lo que escribió el cliente", () => {
+  const email = buildReservationEmail({
+    businessName: "Bandidos",
+    address: null,
+    petName: "<b>Rocco</b>",
+    serviceName: "Baño",
+    date: "2026-10-06",
+    time: "10:00",
+    price: 15000,
+    manageUrl: "https://app.test/reservar/bandidos/turno/abc"
+  });
+  assert.ok(email.html.includes("&lt;b&gt;Rocco&lt;/b&gt;"));
+  assert.ok(email.text.includes("martes 6 de octubre a las 10:00"));
+  assert.ok(email.text.includes("https://app.test/reservar/bandidos/turno/abc"));
+});

@@ -388,6 +388,31 @@ test("web de reservas: rutas públicas y configuración", async (t) => {
     assert.equal(status, 400);
   });
 
+  await t.test("reserva: rechaza datos inválidos, la política sin aceptar y el campo trampa", async () => {
+    const valid = {
+      service_type_id: SERVICE_ONLINE, size: "chico", date: TARGET, time: "09:00",
+      owner_name: "Juana", phone: "381 555-1234", pet_name: "Rocco", accept_policy: true
+    };
+    const post = (body) => request(baseUrl, "/public/booking/bandidos/reservations", { method: "POST", body });
+    assert.equal((await post({ ...valid, accept_policy: false })).status, 400);
+    assert.equal((await post({ ...valid, phone: "--" })).status, 400);
+    assert.equal((await post({ ...valid, website: "spam" })).status, 400);
+    assert.equal((await post({ ...valid, time: "9" })).status, 400);
+  });
+
+  await t.test("reserva: un link inexistente da 404 y un código de turno mal formado también", async () => {
+    const { status } = await request(baseUrl, "/public/booking/no-existe/reservations", {
+      method: "POST",
+      body: {
+        service_type_id: SERVICE_ONLINE, size: "chico", date: TARGET, time: "09:00",
+        owner_name: "Juana", phone: "381 555-1234", pet_name: "Rocco", accept_policy: true
+      }
+    });
+    assert.equal(status, 404);
+    const lookup = await request(baseUrl, "/public/booking/bandidos/reservations/no-es-un-token");
+    assert.equal(lookup.status, 404);
+  });
+
   await t.test("disponibilidad: rechaza parámetros inválidos", async () => {
     const { status } = await request(baseUrl, "/public/booking/bandidos/availability?service_type_id=nope");
     assert.equal(status, 400);

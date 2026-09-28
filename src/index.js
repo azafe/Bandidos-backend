@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import express from "express";
 import cors from "cors";
 import bcrypt from "bcrypt";
@@ -29,6 +30,10 @@ import {
   addDays,
   argentinaNow,
   availabilityQuerySchema,
+  buildReservationEmail,
+  canCancelReservation,
+  phoneKey,
+  reservationSchema,
   bookingHoursSchema,
   bookingSettingsSchema,
   closedDaySchema,
@@ -879,6 +884,61 @@ app.get("/public/booking/:slug", limitPublicBooking, async (req, res) => {
   }
 });
 
+// Datos que necesita el motor de horarios para un rango de fechas. `db` es el
+// pool o el cliente de una transacción (al confirmar una reserva).
+const loadAvailabilityData = async (db, tenantId, start, end) => {
+  const [hours, closed, turnos, blocks] = await Promise.all([
+    db.query(`SELECT weekday, start_time, end_time FROM booking_hours WHERE tenant_id = $1`, [tenantId]),
+    db.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM booking_closed_days
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
+      [tenantId, start, end]
+    ),
+    db.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date, time, duration FROM agenda_turnos
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3 AND status IN ('reserved', 'finished')`,
+      [tenantId, start, end]
+    ),
+    db.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date, start_time, end_time FROM agenda_blocks
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
+      [tenantId, start, end]
+    )
+  ]);
+  return {
+    hours: hours.rows,
+    closedDates: new Set(closed.rows.map((r) => r.date)),
+    turnos: turnos.rows,
+    blocks: blocks.rows
+  };
+};
+
+const slotsForDate = (booking, data, date, duration, now) => {
+  const weekday = weekdayOf(date);
+  return computeDaySlots({
+    date,
+    ranges: data.hours.filter((h) => h.weekday === weekday),
+    closed: data.closedDates.has(date),
+    appointments: data.turnos.filter((t) => t.date === date),
+    blocks: data.blocks.filter((b) => b.date === date),
+    capacity: booking.capacity,
+    interval: booking.slot_interval,
+    duration,
+    now,
+    minNoticeMinutes: booking.min_notice_minutes,
+    maxDaysAhead: booking.max_days_ahead
+  });
+};
+
+const findOnlineService = async (db, serviceTypeId, tenantId) => {
+  const { rows } = await db.query(
+    `SELECT id, name, default_price, duration_minutes, size_pricing
+     FROM service_types WHERE id = $1 AND tenant_id = $2 AND online_enabled = true`,
+    [serviceTypeId, tenantId]
+  );
+  return rows[0] ?? null;
+};
+
 // Horarios libres día por día para un servicio y un tamaño.
 app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, res) => {
   const parsed = availabilityQuerySchema.safeParse(req.query);
@@ -888,15 +948,10 @@ app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, re
   try {
     const booking = await findBookingTenantBySlug(req.params.slug);
     if (!booking || !booking.enabled) return sendError(res, 404, "Booking page not found");
-    const tenantId = booking.tenant_id;
 
-    const service = await pool.query(
-      `SELECT id, name, default_price, duration_minutes, size_pricing
-       FROM service_types WHERE id = $1 AND tenant_id = $2 AND online_enabled = true`,
-      [service_type_id, tenantId]
-    );
-    if (service.rowCount === 0) return sendError(res, 404, "Service not found");
-    const offer = resolveServiceOffer(service.rows[0], size);
+    const service = await findOnlineService(pool, service_type_id, booking.tenant_id);
+    if (!service) return sendError(res, 404, "Service not found");
+    const offer = resolveServiceOffer(service, size);
 
     // El rango pedido se recorta a [hoy, hoy + anticipación máxima].
     const now = argentinaNow();
@@ -906,7 +961,7 @@ app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, re
     const end = requestedEnd < lastAllowed ? requestedEnd : lastAllowed;
 
     const response = {
-      service: { id: service.rows[0].id, name: service.rows[0].name },
+      service: { id: service.id, name: service.name },
       size: size ?? null,
       price: offer.price,
       duration: offer.duration,
@@ -914,53 +969,232 @@ app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, re
     };
     if (end < start) return res.json(response);
 
-    const [hours, closed, turnos, blocks] = await Promise.all([
-      pool.query(
-        `SELECT weekday, start_time, end_time FROM booking_hours WHERE tenant_id = $1`,
-        [tenantId]
-      ),
-      pool.query(
-        `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM booking_closed_days
-         WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
-        [tenantId, start, end]
-      ),
-      pool.query(
-        `SELECT to_char(date, 'YYYY-MM-DD') AS date, time, duration FROM agenda_turnos
-         WHERE tenant_id = $1 AND date BETWEEN $2 AND $3 AND status IN ('reserved', 'finished')`,
-        [tenantId, start, end]
-      ),
-      pool.query(
-        `SELECT to_char(date, 'YYYY-MM-DD') AS date, start_time, end_time FROM agenda_blocks
-         WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
-        [tenantId, start, end]
-      )
-    ]);
-
-    const closedDates = new Set(closed.rows.map((r) => r.date));
-    const byDate = (rows, date) => rows.filter((r) => r.date === date);
-
+    const data = await loadAvailabilityData(pool, booking.tenant_id, start, end);
     for (let i = 0; i <= daysBetween(start, end); i += 1) {
       const date = addDays(start, i);
-      const weekday = weekdayOf(date);
-      response.days.push({
-        date,
-        slots: computeDaySlots({
-          date,
-          ranges: hours.rows.filter((h) => h.weekday === weekday),
-          closed: closedDates.has(date),
-          appointments: byDate(turnos.rows, date),
-          blocks: byDate(blocks.rows, date),
-          capacity: booking.capacity,
-          interval: booking.slot_interval,
-          duration: offer.duration,
-          now,
-          minNoticeMinutes: booking.min_notice_minutes,
-          maxDaysAhead: booking.max_days_ahead
-        })
-      });
+      response.days.push({ date, slots: slotsForDate(booking, data, date, offer.duration, now) });
+    }
+    res.json(response);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Crear una reserva: más estricto que la consulta, para frenar abusos.
+const reservationIpLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
+// Turnos online futuros que puede tener reservados un mismo celular.
+const MAX_ACTIVE_ONLINE_PER_PHONE = 3;
+
+// Link que el cliente usa para ver o cancelar su turno. Sale de la URL del
+// frontend (PUBLIC_APP_URL, o el origen de PASSWORD_RESET_URL_BASE).
+const publicAppBaseUrl = () => {
+  const explicit = process.env.PUBLIC_APP_URL;
+  if (explicit) return explicit.replace(/\/+$/, "");
+  try {
+    return passwordResetUrlBase ? new URL(passwordResetUrlBase).origin : null;
+  } catch {
+    return null;
+  }
+};
+
+const reservationView = (turno, booking, now) => ({
+  date: turno.date,
+  time: String(turno.time).slice(0, 5),
+  duration: turno.duration,
+  status: turno.status,
+  pet_name: turno.pet_name,
+  owner_name: turno.owner_name,
+  service_name: turno.service_name ?? null,
+  price: turno.price !== null && turno.price !== undefined ? Number(turno.price) : null,
+  can_cancel: canCancelReservation(turno, booking.cancel_hours, now),
+  cancel_hours: booking.cancel_hours,
+  business: {
+    name: booking.tenant_name,
+    logo_url: booking.logo_url,
+    address: booking.address,
+    whatsapp: booking.whatsapp
+  }
+});
+
+app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, res) => {
+  if (!reservationIpLimiter.consume(getClientIp(req))) return sendError(res, 429, "Too many requests");
+  const parsed = reservationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+  const input = parsed.data;
+
+  let booking;
+  try {
+    booking = await findBookingTenantBySlug(req.params.slug);
+  } catch (err) {
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
+  }
+  if (!booking || !booking.enabled) return sendError(res, 404, "Booking page not found");
+  const tenantId = booking.tenant_id;
+  const phone = phoneKey(input.phone);
+
+  const client = await pool.connect();
+  let turno;
+  let service;
+  try {
+    await client.query("BEGIN");
+    // Serializa las reservas del mismo local y día: dos clientes no pueden
+    // quedarse con el último cupo al mismo tiempo.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`${tenantId}:${input.date}`]);
+
+    service = await findOnlineService(client, input.service_type_id, tenantId);
+    if (!service) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Service not found");
+    }
+    const offer = resolveServiceOffer(service, input.size);
+
+    const now = argentinaNow();
+    const data = await loadAvailabilityData(client, tenantId, input.date, input.date);
+    if (!slotsForDate(booking, data, input.date, offer.duration, now).includes(input.time)) {
+      await client.query("ROLLBACK");
+      return sendError(res, 409, "Slot not available");
     }
 
-    res.json(response);
+    const active = await client.query(
+      `SELECT COUNT(*)::int AS n
+       FROM agenda_turnos a
+       JOIN pets p ON p.id = a.pet_id
+       WHERE a.tenant_id = $1 AND a.source = 'online' AND a.status = 'reserved'
+         AND a.date >= $2 AND right(regexp_replace(coalesce(p.owner_phone, ''), '\\D', '', 'g'), 10) = $3`,
+      [tenantId, now.date, phone]
+    );
+    if (active.rows[0].n >= MAX_ACTIVE_ONLINE_PER_PHONE) {
+      await client.query("ROLLBACK");
+      return sendError(res, 429, "Too many active reservations");
+    }
+
+    // Se asocia a la mascota existente si coinciden celular y nombre; si no,
+    // se crea una nueva. Al cliente no se le muestra nada de lo que ya hay.
+    const existing = await client.query(
+      `SELECT id FROM pets
+       WHERE tenant_id = $1 AND archived_at IS NULL
+         AND lower(trim(name)) = lower(trim($2))
+         AND right(regexp_replace(coalesce(owner_phone, ''), '\\D', '', 'g'), 10) = $3
+       ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, input.pet_name, phone]
+    );
+    let petId = existing.rows[0]?.id ?? null;
+    if (!petId) {
+      const created = await client.query(
+        `INSERT INTO pets (name, breed, owner_name, owner_phone, size, tenant_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [input.pet_name, input.breed ?? null, input.owner_name, input.phone, input.size, tenantId]
+      );
+      petId = created.rows[0].id;
+    }
+
+    const notes = [
+      input.notes,
+      input.email ? `Email: ${input.email}` : null,
+      `Reservado online · tamaño ${input.size}`
+    ].filter(Boolean).join("\n");
+
+    const inserted = await client.query(
+      `INSERT INTO agenda_turnos
+         (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
+          price, deposit_amount, notes, status, tenant_id, source, cancel_token)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, 'reserved', $11, 'online', $12)
+       RETURNING id, to_char(date, 'YYYY-MM-DD') AS date, time, duration, status, pet_name, owner_name, price, cancel_token`,
+      [
+        input.date, input.time, offer.duration, petId, input.pet_name, input.breed ?? null, input.owner_name,
+        service.id, offer.price, notes, tenantId, crypto.randomBytes(24).toString("hex")
+      ]
+    );
+    turno = inserted.rows[0];
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+
+  const view = reservationView({ ...turno, service_name: service.name }, booking, argentinaNow());
+  res.status(201).json({ ...view, token: turno.cancel_token });
+
+  sendPushToTenant(tenantId, {
+    title: "🌐 Nueva reserva online",
+    body: `${formatPushDate(`${turno.date}T12:00:00Z`)} · ${view.time} · ${turno.pet_name} (${service.name})`
+  });
+
+  if (input.email) {
+    const base = publicAppBaseUrl();
+    const email = buildReservationEmail({
+      businessName: booking.tenant_name,
+      address: booking.address,
+      petName: turno.pet_name,
+      serviceName: service.name,
+      date: turno.date,
+      time: view.time,
+      price: view.price,
+      manageUrl: base ? `${base}/reservar/${booking.slug}/turno/${turno.cancel_token}` : null
+    });
+    emailClient.sendEmail({ to: input.email, ...email }).catch((err) => {
+      console.error("[booking] No se pudo enviar el email de confirmación:", err);
+    });
+  }
+});
+
+const findReservationByToken = async (tenantId, token) => {
+  if (!/^[a-f0-9]{48}$/.test(token)) return null;
+  const { rows } = await pool.query(
+    `SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date, a.time, a.duration, a.status, a.pet_name,
+            a.owner_name, a.price, st.name AS service_name
+     FROM agenda_turnos a
+     LEFT JOIN service_types st ON st.id = a.service_type_id
+     WHERE a.tenant_id = $1 AND a.cancel_token = $2`,
+    [tenantId, token]
+  );
+  return rows[0] ?? null;
+};
+
+app.get("/public/booking/:slug/reservations/:token", limitPublicBooking, async (req, res) => {
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking) return sendError(res, 404, "Reservation not found");
+    const turno = await findReservationByToken(booking.tenant_id, req.params.token);
+    if (!turno) return sendError(res, 404, "Reservation not found");
+    res.json(reservationView(turno, booking, argentinaNow()));
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+app.post("/public/booking/:slug/reservations/:token/cancel", limitPublicBooking, async (req, res) => {
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking) return sendError(res, 404, "Reservation not found");
+    const turno = await findReservationByToken(booking.tenant_id, req.params.token);
+    if (!turno) return sendError(res, 404, "Reservation not found");
+
+    const now = argentinaNow();
+    if (!canCancelReservation(turno, booking.cancel_hours, now)) {
+      return sendError(res, 409, "Reservation can no longer be cancelled");
+    }
+    // El WHERE por status evita pisar un cambio hecho desde la agenda en el medio.
+    const updated = await pool.query(
+      `UPDATE agenda_turnos SET status = 'cancelled'
+       WHERE id = $1 AND tenant_id = $2 AND status = 'reserved'`,
+      [turno.id, booking.tenant_id]
+    );
+    if (updated.rowCount === 0) return sendError(res, 409, "Reservation can no longer be cancelled");
+
+    res.json(reservationView({ ...turno, status: "cancelled" }, booking, now));
+    sendPushToTenant(booking.tenant_id, {
+      title: "Turno cancelado por el cliente",
+      body: `${formatPushDate(`${turno.date}T12:00:00Z`)} · ${String(turno.time).slice(0, 5)} · ${turno.pet_name}`
+    });
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
