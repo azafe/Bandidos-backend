@@ -24,6 +24,22 @@ import {
 } from "./auth/passwordResetService.js";
 import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 import { uploadPhoto } from "./storage.js";
+import {
+  BOOKING_SIZES,
+  addDays,
+  argentinaNow,
+  availabilityQuerySchema,
+  bookingHoursSchema,
+  bookingSettingsSchema,
+  closedDaySchema,
+  computeDaySlots,
+  daysBetween,
+  resolveServiceOffer,
+  sizePricingSchema,
+  slugify,
+  summarizeServiceOffer,
+  weekdayOf
+} from "./booking.js";
 
 const vapidConfigured = process.env.VAPID_EMAIL && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY;
 if (vapidConfigured) {
@@ -322,14 +338,25 @@ const createPetshopStockMovementSchema = z.object({
   note: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
+// Campos de la web de reservas: duración, precio por tamaño y si se ofrece
+// online. Son opcionales para que las pantallas actuales sigan funcionando.
+const serviceTypeBookingFields = {
+  duration_minutes: z.coerce.number().int().min(5).max(600).optional().nullable(),
+  online_enabled: z.boolean().optional(),
+  size_pricing: sizePricingSchema.optional(),
+  description: z.string().trim().max(500).optional().nullable()
+};
+
 const createServiceTypeSchema = z.object({
   name: z.string().min(1),
-  default_price: z.coerce.number().min(0).optional().nullable()
+  default_price: z.coerce.number().min(0).optional().nullable(),
+  ...serviceTypeBookingFields
 });
 
 const updateServiceTypeSchema = z.object({
   name: z.string().min(1).optional(),
-  default_price: z.coerce.number().min(0).optional().nullable()
+  default_price: z.coerce.number().min(0).optional().nullable(),
+  ...serviceTypeBookingFields
 });
 
 const createPaymentMethodSchema = z.object({
@@ -764,6 +791,179 @@ app.post("/auth/reset-password", async (req, res) => {
     }
     console.error(err);
     return sendError(res, 500, "Unexpected error");
+  }
+});
+
+// ── Web de reservas: rutas públicas ─────────────────────────────────────────
+//
+// Van ANTES de app.use(requireAuth): las usa el cliente del local desde la
+// página /reservar/<slug>, sin usuario. Exponen lo mínimo (datos de portada,
+// servicios publicados y horarios libres) y siempre filtran por el tenant que
+// resuelve el slug, nunca por algo que mande el cliente.
+
+const publicBookingLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 60 });
+
+const limitPublicBooking = (req, res, next) => {
+  if (!publicBookingLimiter.consume(getClientIp(req))) {
+    return sendError(res, 429, "Too many requests");
+  }
+  next();
+};
+
+// Local publicado por slug, o null si no existe o el local está suspendido.
+const findBookingTenantBySlug = async (slug) => {
+  const { rows } = await pool.query(
+    `SELECT bs.*, t.name AS tenant_name, t.logo_url, t.primary_color, t.secondary_color
+     FROM booking_settings bs
+     JOIN tenants t ON t.id = bs.tenant_id
+     WHERE bs.slug = $1 AND t.status = 'active'`,
+    [String(slug).toLowerCase()]
+  );
+  return rows[0] ?? null;
+};
+
+const publicServiceView = (serviceType) => ({
+  id: serviceType.id,
+  name: serviceType.name,
+  description: serviceType.description ?? null,
+  ...summarizeServiceOffer(serviceType),
+  sizes: Object.fromEntries(BOOKING_SIZES.map((size) => [size, resolveServiceOffer(serviceType, size)]))
+});
+
+app.get("/public/booking/:slug", limitPublicBooking, async (req, res) => {
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking) return sendError(res, 404, "Booking page not found");
+
+    const business = {
+      name: booking.tenant_name,
+      logo_url: booking.logo_url,
+      primary_color: booking.primary_color,
+      secondary_color: booking.secondary_color,
+      address: booking.address,
+      whatsapp: booking.whatsapp
+    };
+
+    // Apagada: la página muestra el aviso y el botón de WhatsApp.
+    if (!booking.enabled) return res.json({ enabled: false, business });
+
+    const [hours, services] = await Promise.all([
+      pool.query(
+        `SELECT weekday, to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time
+         FROM booking_hours WHERE tenant_id = $1 ORDER BY weekday, start_time`,
+        [booking.tenant_id]
+      ),
+      pool.query(
+        `SELECT id, name, description, default_price, duration_minutes, size_pricing
+         FROM service_types WHERE tenant_id = $1 AND online_enabled = true ORDER BY name`,
+        [booking.tenant_id]
+      )
+    ]);
+
+    res.json({
+      enabled: true,
+      business,
+      rules: {
+        min_notice_minutes: booking.min_notice_minutes,
+        max_days_ahead: booking.max_days_ahead,
+        cancel_hours: booking.cancel_hours,
+        cancellation_policy: booking.cancellation_policy
+      },
+      hours: hours.rows,
+      sizes: BOOKING_SIZES,
+      services: services.rows.map(publicServiceView)
+    });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Horarios libres día por día para un servicio y un tamaño.
+app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, res) => {
+  const parsed = availabilityQuerySchema.safeParse(req.query);
+  if (!parsed.success) return sendError(res, 400, "Invalid query");
+  const { service_type_id, size, from, days } = parsed.data;
+
+  try {
+    const booking = await findBookingTenantBySlug(req.params.slug);
+    if (!booking || !booking.enabled) return sendError(res, 404, "Booking page not found");
+    const tenantId = booking.tenant_id;
+
+    const service = await pool.query(
+      `SELECT id, name, default_price, duration_minutes, size_pricing
+       FROM service_types WHERE id = $1 AND tenant_id = $2 AND online_enabled = true`,
+      [service_type_id, tenantId]
+    );
+    if (service.rowCount === 0) return sendError(res, 404, "Service not found");
+    const offer = resolveServiceOffer(service.rows[0], size);
+
+    // El rango pedido se recorta a [hoy, hoy + anticipación máxima].
+    const now = argentinaNow();
+    const start = from && from > now.date ? from : now.date;
+    const lastAllowed = addDays(now.date, booking.max_days_ahead);
+    const requestedEnd = addDays(start, days - 1);
+    const end = requestedEnd < lastAllowed ? requestedEnd : lastAllowed;
+
+    const response = {
+      service: { id: service.rows[0].id, name: service.rows[0].name },
+      size: size ?? null,
+      price: offer.price,
+      duration: offer.duration,
+      days: []
+    };
+    if (end < start) return res.json(response);
+
+    const [hours, closed, turnos, blocks] = await Promise.all([
+      pool.query(
+        `SELECT weekday, start_time, end_time FROM booking_hours WHERE tenant_id = $1`,
+        [tenantId]
+      ),
+      pool.query(
+        `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM booking_closed_days
+         WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
+        [tenantId, start, end]
+      ),
+      pool.query(
+        `SELECT to_char(date, 'YYYY-MM-DD') AS date, time, duration FROM agenda_turnos
+         WHERE tenant_id = $1 AND date BETWEEN $2 AND $3 AND status IN ('reserved', 'finished')`,
+        [tenantId, start, end]
+      ),
+      pool.query(
+        `SELECT to_char(date, 'YYYY-MM-DD') AS date, start_time, end_time FROM agenda_blocks
+         WHERE tenant_id = $1 AND date BETWEEN $2 AND $3`,
+        [tenantId, start, end]
+      )
+    ]);
+
+    const closedDates = new Set(closed.rows.map((r) => r.date));
+    const byDate = (rows, date) => rows.filter((r) => r.date === date);
+
+    for (let i = 0; i <= daysBetween(start, end); i += 1) {
+      const date = addDays(start, i);
+      const weekday = weekdayOf(date);
+      response.days.push({
+        date,
+        slots: computeDaySlots({
+          date,
+          ranges: hours.rows.filter((h) => h.weekday === weekday),
+          closed: closedDates.has(date),
+          appointments: byDate(turnos.rows, date),
+          blocks: byDate(blocks.rows, date),
+          capacity: booking.capacity,
+          interval: booking.slot_interval,
+          duration: offer.duration,
+          now,
+          minNoticeMinutes: booking.min_notice_minutes,
+          maxDaysAhead: booking.max_days_ahead
+        })
+      });
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
   }
 });
 
@@ -2361,11 +2561,16 @@ app.post("/v2/service-types", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createServiceTypeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
-  const { name, default_price } = parsed.data;
+  const { name, default_price, duration_minutes, online_enabled, size_pricing, description } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO service_types (name, default_price, tenant_id) VALUES ($1, $2, $3) RETURNING *`,
-      [name, default_price ?? null, req.tenantId]
+      `INSERT INTO service_types
+         (name, default_price, duration_minutes, online_enabled, size_pricing, description, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        name, default_price ?? null, duration_minutes ?? null, online_enabled ?? false,
+        size_pricing ?? {}, description ?? null, req.tenantId
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
@@ -2375,7 +2580,10 @@ app.put("/v2/service-types/:id", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceTypeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
-  const { fields, values, idx } = buildUpdate(["name", "default_price"], parsed.data);
+  const { fields, values, idx } = buildUpdate(
+    ["name", "default_price", "duration_minutes", "online_enabled", "size_pricing", "description"],
+    parsed.data
+  );
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
   values.push(req.params.id);
   const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
@@ -2395,6 +2603,154 @@ app.delete("/v2/service-types/:id", async (req, res) => {
   try {
     const result = await pool.query(`DELETE FROM service_types WHERE id = $1${tenantClause}`, params);
     if (result.rowCount === 0) return sendError(res, 404, "Service type not found");
+    res.json({ ok: true });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+// ── Web de reservas: configuración del local ────────────────────────────────
+
+const BOOKING_SETTINGS_FIELDS = [
+  "enabled", "slug", "address", "whatsapp", "cancellation_policy",
+  "capacity", "slot_interval", "min_notice_minutes", "max_days_ahead", "cancel_hours"
+];
+
+const BOOKING_SETTINGS_DEFAULTS = {
+  enabled: false,
+  slug: null,
+  address: null,
+  whatsapp: null,
+  cancellation_policy: null,
+  capacity: 1,
+  slot_interval: 30,
+  min_notice_minutes: 120,
+  max_days_ahead: 30,
+  cancel_hours: 24
+};
+
+const loadBookingConfig = async (tenantId) => {
+  const [settings, tenant, hours, closedDays] = await Promise.all([
+    pool.query(`SELECT * FROM booking_settings WHERE tenant_id = $1`, [tenantId]),
+    pool.query(`SELECT name FROM tenants WHERE id = $1`, [tenantId]),
+    pool.query(
+      `SELECT id, weekday, to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time
+       FROM booking_hours WHERE tenant_id = $1 ORDER BY weekday, start_time`,
+      [tenantId]
+    ),
+    pool.query(
+      `SELECT id, to_char(date, 'YYYY-MM-DD') AS date, reason FROM booking_closed_days
+       WHERE tenant_id = $1 AND date >= $2 ORDER BY date`,
+      [tenantId, argentinaNow().date]
+    )
+  ]);
+
+  const saved = settings.rows[0];
+  const base = saved
+    ? Object.fromEntries(BOOKING_SETTINGS_FIELDS.map((f) => [f, saved[f]]))
+    : { ...BOOKING_SETTINGS_DEFAULTS };
+
+  return {
+    settings: base,
+    // Sugerencia de link para el primer guardado, armada con el nombre del local.
+    suggested_slug: base.slug ?? slugify(tenant.rows[0]?.name ?? ""),
+    hours: hours.rows,
+    closed_days: closedDays.rows
+  };
+};
+
+app.get("/v2/booking/settings", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    res.json(await loadBookingConfig(req.tenantId));
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.put("/v2/booking/settings", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = bookingSettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
+  }
+  const data = parsed.data;
+
+  try {
+    const current = await pool.query(`SELECT slug FROM booking_settings WHERE tenant_id = $1`, [req.tenantId]);
+    const finalSlug = data.slug ?? current.rows[0]?.slug ?? null;
+    // Sin link no hay página: no se puede prender la web sin elegir uno.
+    if (data.enabled && !finalSlug) return sendError(res, 400, "A slug is required to enable online booking");
+
+    const fields = BOOKING_SETTINGS_FIELDS.filter((f) => data[f] !== undefined);
+    const values = fields.map((f) => data[f]);
+    const insertCols = ["tenant_id", ...fields];
+    const placeholders = insertCols.map((_, i) => `$${i + 1}`);
+    const updates = [...fields.map((f) => `${f} = EXCLUDED.${f}`), "updated_at = now()"];
+
+    await pool.query(
+      `INSERT INTO booking_settings (${insertCols.join(", ")})
+       VALUES (${placeholders.join(", ")})
+       ON CONFLICT (tenant_id) DO UPDATE SET ${updates.join(", ")}`,
+      [req.tenantId, ...values]
+    );
+    res.json(await loadBookingConfig(req.tenantId));
+  } catch (err) {
+    if (err.code === "23505") return sendError(res, 409, "Slug already taken");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
+// Reemplaza el horario semanal completo (lo que se ve en la pantalla).
+app.put("/v2/booking/hours", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = bookingHoursSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM booking_hours WHERE tenant_id = $1`, [req.tenantId]);
+    for (const h of parsed.data.hours) {
+      await client.query(
+        `INSERT INTO booking_hours (tenant_id, weekday, start_time, end_time) VALUES ($1, $2, $3, $4)`,
+        [req.tenantId, h.weekday, h.start_time, h.end_time]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    return sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
+
+  try {
+    res.json(await loadBookingConfig(req.tenantId));
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.post("/v2/booking/closed-days", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = closedDaySchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  try {
+    const result = await pool.query(
+      `INSERT INTO booking_closed_days (tenant_id, date, reason) VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, date) DO UPDATE SET reason = EXCLUDED.reason
+       RETURNING id, to_char(date, 'YYYY-MM-DD') AS date, reason`,
+      [req.tenantId, parsed.data.date, parsed.data.reason ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.delete("/v2/booking/closed-days/:id", requireRole("admin"), async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `DELETE FROM booking_closed_days WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Closed day not found");
     res.json({ ok: true });
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
