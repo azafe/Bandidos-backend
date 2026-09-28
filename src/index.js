@@ -39,6 +39,7 @@ import {
   closedDaySchema,
   computeDaySlots,
   daysBetween,
+  resolveBookingOffer,
   resolveServiceOffer,
   sizePricingSchema,
   slugify,
@@ -939,7 +940,7 @@ const findOnlineService = async (db, serviceTypeId, tenantId) => {
   return rows[0] ?? null;
 };
 
-// Horarios libres día por día para un servicio y un tamaño.
+// Horarios libres día por día para un servicio (y un tamaño, si el cliente lo eligió).
 app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, res) => {
   const parsed = availabilityQuerySchema.safeParse(req.query);
   if (!parsed.success) return sendError(res, 400, "Invalid query");
@@ -951,7 +952,7 @@ app.get("/public/booking/:slug/availability", limitPublicBooking, async (req, re
 
     const service = await findOnlineService(pool, service_type_id, booking.tenant_id);
     if (!service) return sendError(res, 404, "Service not found");
-    const offer = resolveServiceOffer(service, size);
+    const offer = resolveBookingOffer(service, size);
 
     // El rango pedido se recorta a [hoy, hoy + anticipación máxima].
     const now = argentinaNow();
@@ -1050,7 +1051,7 @@ app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, r
       await client.query("ROLLBACK");
       return sendError(res, 404, "Service not found");
     }
-    const offer = resolveServiceOffer(service, input.size);
+    const offer = resolveBookingOffer(service, input.size);
 
     const now = argentinaNow();
     const data = await loadAvailabilityData(client, tenantId, input.date, input.date);
@@ -1087,7 +1088,7 @@ app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, r
       const created = await client.query(
         `INSERT INTO pets (name, breed, owner_name, owner_phone, size, tenant_id)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-        [input.pet_name, input.breed ?? null, input.owner_name, input.phone, input.size, tenantId]
+        [input.pet_name, input.breed ?? null, input.owner_name, input.phone, input.size ?? null, tenantId]
       );
       petId = created.rows[0].id;
     }
@@ -1095,7 +1096,7 @@ app.post("/public/booking/:slug/reservations", limitPublicBooking, async (req, r
     const notes = [
       input.notes,
       input.email ? `Email: ${input.email}` : null,
-      `Reservado online · tamaño ${input.size}`
+      input.size ? `Reservado online · tamaño ${input.size}` : "Reservado online · tamaño y precio a definir por el local"
     ].filter(Boolean).join("\n");
 
     const inserted = await client.query(

@@ -155,10 +155,25 @@ test("precio y duración según tamaño, con respaldo en los valores generales",
 
   assert.deepEqual(summarizeServiceOffer(bano), {
     price_from: 15000,
+    price_to: 30000,
     duration_min: 60,
     duration_max: 90,
     varies_by_size: true
   });
+});
+
+test("sin tamaño, se reserva la duración más larga y el precio queda a definir", async () => {
+  const { offerForUnknownSize, resolveBookingOffer } = await import("../src/booking.js");
+  const bano = {
+    default_price: "15000.00",
+    duration_minutes: 60,
+    size_pricing: { grande: { price: 22000, duration: 90 }, gigante: { price: 30000, duration: 120 } }
+  };
+  assert.deepEqual(offerForUnknownSize(bano), { price: null, duration: 120 });
+  assert.deepEqual(resolveBookingOffer(bano, undefined), { price: null, duration: 120 });
+  assert.deepEqual(resolveBookingOffer(bano, "grande"), { price: 22000, duration: 90 });
+  // Sin precios por tamaño, la duración es la general.
+  assert.deepEqual(offerForUnknownSize({ default_price: 1000, duration_minutes: 45, size_pricing: {} }), { price: null, duration: 45 });
 });
 
 test("argentinaNow convierte desde UTC (Argentina es UTC-3)", () => {
@@ -243,6 +258,10 @@ test("valida la reserva: política aceptada, celular con dígitos y campo trampa
   assert.equal(reservationSchema.safeParse({ ...base, phone: "abc" }).success, false);
   assert.equal(reservationSchema.safeParse({ ...base, website: "http://spam" }).success, false);
   assert.equal(reservationSchema.safeParse({ ...base, size: "enorme" }).success, false);
+  // El tamaño es opcional: lo define el local.
+  const withoutSize = { ...base };
+  delete withoutSize.size;
+  assert.equal(reservationSchema.safeParse(withoutSize).success, true);
 });
 
 test("el email de confirmación escapa lo que escribió el cliente", () => {

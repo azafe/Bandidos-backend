@@ -111,10 +111,24 @@ export function summarizeServiceOffer(serviceType) {
   const durations = offers.map((o) => o.duration);
   return {
     price_from: prices.length ? Math.min(...prices) : null,
+    price_to: prices.length ? Math.max(...prices) : null,
     duration_min: Math.min(...durations),
     duration_max: Math.max(...durations),
     varies_by_size: BOOKING_SIZES.some((s) => serviceType?.size_pricing?.[s])
   };
+}
+
+// Oferta cuando el cliente no sabe el tamaño del perro (lo define el local al
+// atenderlo): se reserva la duración más larga para no quedarse corto de
+// tiempo, y el precio queda sin fijar (el cliente ve el rango).
+export function offerForUnknownSize(serviceType) {
+  const summary = summarizeServiceOffer(serviceType);
+  return { price: null, duration: summary.duration_max };
+}
+
+// Tamaño elegido por el cliente o, si no lo sabe, la oferta sin tamaño.
+export function resolveBookingOffer(serviceType, size) {
+  return size ? resolveServiceOffer(serviceType, size) : offerForUnknownSize(serviceType);
 }
 
 // ── Disponibilidad ─────────────────────────────────────────────────────────
@@ -294,7 +308,8 @@ const requiredText = (max) => z.string().trim().min(1).max(max);
 
 export const reservationSchema = z.object({
   service_type_id: z.string().uuid(),
-  size: z.enum(BOOKING_SIZES),
+  // Opcional: el tamaño lo define el local al atender al perro.
+  size: z.enum(BOOKING_SIZES).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   time: hhmm,
   owner_name: requiredText(120),

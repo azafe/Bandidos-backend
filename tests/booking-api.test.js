@@ -307,6 +307,16 @@ test("web de reservas: rutas públicas y configuración", async (t) => {
     assert.deepEqual(body.days, [{ date: TARGET, slots: ["09:00", "11:00"] }]);
   });
 
+  await t.test("disponibilidad sin tamaño: reserva la duración más larga y no fija precio", async () => {
+    const { body } = await request(
+      baseUrl,
+      `/public/booking/bandidos/availability?service_type_id=${SERVICE_ONLINE}&from=${TARGET}&days=1`
+    );
+    assert.equal(body.size, null);
+    assert.equal(body.price, null);
+    assert.equal(body.duration, 90);
+  });
+
   await t.test("disponibilidad: el tamaño grande dura 90 minutos y deja menos horarios", async () => {
     const { body } = await request(
       baseUrl,
