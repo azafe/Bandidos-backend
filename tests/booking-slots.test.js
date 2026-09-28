@@ -63,6 +63,17 @@ test("junta varias franjas del mismo día (corte al mediodía)", () => {
   assert.deepEqual(result, ["09:00", "10:00", "16:00", "17:00"]);
 });
 
+test("dos franjas pegadas cuentan como una: el servicio puede cruzar el límite", () => {
+  const result = slots({
+    ranges: [
+      { start_time: "09:00", end_time: "10:00" },
+      { start_time: "10:00", end_time: "11:00" }
+    ],
+    duration: 90
+  });
+  assert.deepEqual(result, ["09:00", "09:30"]);
+});
+
 test("con cupo 1, un turno existente tapa los horarios que se le superponen", () => {
   const result = slots({ appointments: [{ time: "10:00:00", duration: 60 }] });
   // 09:00-10:00 termina justo cuando empieza el turno: sí se ofrece.

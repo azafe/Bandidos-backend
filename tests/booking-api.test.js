@@ -133,6 +133,11 @@ function createFakeDb() {
       return { rowCount: row ? 1 : 0, rows: row ? [{ slug: row.slug }] : [] };
     }
 
+    if (q.startsWith("select slug, enabled from booking_settings where tenant_id = $1")) {
+      const row = settings.get(params[0]);
+      return { rowCount: row ? 1 : 0, rows: row ? [{ slug: row.slug, enabled: row.enabled }] : [] };
+    }
+
     if (q.startsWith("select name from tenants where id = $1")) {
       const tenant = tenants.get(params[0]);
       return { rowCount: tenant ? 1 : 0, rows: tenant ? [{ name: tenant.name }] : [] };
@@ -157,6 +162,24 @@ function createFakeDb() {
         capacity: 1, slot_interval: 30, min_notice_minutes: 120, max_days_ahead: 30, cancel_hours: 24
       };
       settings.set(incoming.tenant_id, { ...current, ...incoming });
+      return { rowCount: 1, rows: [] };
+    }
+
+    if (q.startsWith("insert into agenda_blocks")) {
+      const row = { id: crypto.randomUUID(), tenant_id: params[0], date: params[1], start_time: params[2], end_time: params[3], reason: params[4] };
+      blocks.push(row);
+      return { rowCount: 1, rows: [{ id: row.id, date: row.date, start_time: row.start_time, end_time: row.end_time, reason: row.reason }] };
+    }
+
+    if (q.includes("from agenda_blocks where tenant_id = $1 and date between $2 and $3 order by")) {
+      const rows = blocks.filter((b) => b.tenant_id === params[0] && b.date >= params[1] && b.date <= params[2]);
+      return { rowCount: rows.length, rows };
+    }
+
+    if (q.startsWith("delete from agenda_blocks")) {
+      const i = blocks.findIndex((b) => b.id === params[0] && b.tenant_id === params[1]);
+      if (i < 0) return { rowCount: 0, rows: [] };
+      blocks.splice(i, 1);
       return { rowCount: 1, rows: [] };
     }
 
@@ -267,6 +290,12 @@ test("web de reservas: rutas públicas y configuración", async (t) => {
     assert.equal(body.hours.length, 7);
   });
 
+  await t.test("el equipo ve el link público para compartirlo", async () => {
+    const { status, body } = await request(baseUrl, "/v2/booking/link", { token: staff });
+    assert.equal(status, 200);
+    assert.deepEqual(body, { slug: "bandidos", enabled: true });
+  });
+
   await t.test("disponibilidad: descuenta el turno reservado e ignora cancelados y otros locales", async () => {
     const { status, body } = await request(
       baseUrl,
@@ -324,6 +353,39 @@ test("web de reservas: rutas públicas y configuración", async (t) => {
     // Hoy + 30 días es el último día permitido: quedan 2 días (29 y 30).
     assert.equal(body.days.length, 2);
     assert.equal(weekdayOf(body.days[0].date), weekdayOf(addDays(argentinaNow().date, 29)));
+  });
+
+  await t.test("un bloqueo cargado desde la agenda saca esos horarios de la web", async () => {
+    const staffBlock = await request(baseUrl, "/v2/agenda/blocks", {
+      method: "POST", token: staff, body: { date: TARGET, start_time: "08:30", end_time: "09:30", reason: "Trámite" }
+    });
+    assert.equal(staffBlock.status, 201);
+    assert.equal(staffBlock.body.start_time, "08:30");
+
+    const listed = await request(baseUrl, `/v2/agenda/blocks?from=${TARGET}&to=${TARGET}`, { token: staff });
+    assert.equal(listed.body.length, 1);
+
+    const { body } = await request(
+      baseUrl,
+      `/public/booking/bandidos/availability?service_type_id=${SERVICE_ONLINE}&size=chico&from=${TARGET}&days=1`
+    );
+    assert.deepEqual(body.days[0].slots, ["11:00"]);
+
+    // Otro local no puede borrarlo.
+    const otherAdmin = signTokenFor({ role: "admin", tenant_id: TENANT_B }).token;
+    const foreign = await request(baseUrl, `/v2/agenda/blocks/${staffBlock.body.id}`, { method: "DELETE", token: otherAdmin });
+    assert.equal(foreign.status, 404);
+
+    const removed = await request(baseUrl, `/v2/agenda/blocks/${staffBlock.body.id}`, { method: "DELETE", token: staff });
+    assert.equal(removed.status, 200);
+    assert.equal(db.blocks.length, 0);
+  });
+
+  await t.test("un bloqueo con la hora de fin antes que la de inicio se rechaza", async () => {
+    const { status } = await request(baseUrl, "/v2/agenda/blocks", {
+      method: "POST", token: staff, body: { date: TARGET, start_time: "12:00", end_time: "10:00" }
+    });
+    assert.equal(status, 400);
   });
 
   await t.test("disponibilidad: rechaza parámetros inválidos", async () => {

@@ -100,7 +100,7 @@ app.use(cors({ origin: corsOrigin, allowedHeaders: ["Content-Type", "Authorizati
 app.use(express.json({ limit: "6mb" }));
 
 const statusSchema = z.enum(["active", "inactive"]);
-const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled"]);
+const agendaStatusSchema = z.enum(["reserved", "finished", "cancelled", "no_show"]);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
@@ -1856,7 +1856,8 @@ function petStatsJoin(tenantParam) {
         MIN(date) FILTER (WHERE status = 'finished') AS first_visit_date,
         MIN(date) FILTER (WHERE status = 'reserved' AND date >= ${AR_TODAY_SQL}) AS next_turno_date,
         COUNT(*) FILTER (WHERE status = 'reserved' AND date >= ${AR_TODAY_SQL})::int AS upcoming_count,
-        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_count
+        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_count,
+        COUNT(*) FILTER (WHERE status = 'no_show')::int AS no_show_count
       FROM agenda_turnos
       WHERE pet_id IS NOT NULL
       ${tenantParam ? `AND tenant_id = ${tenantParam}` : ""}
@@ -2271,7 +2272,9 @@ app.get("/agenda/counts", async (req, res) => {
               COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE status = 'finished')::int AS finished,
               COUNT(*) FILTER (WHERE status = 'reserved')::int AS reserved,
-              COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled
+              COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
+              COUNT(*) FILTER (WHERE status = 'no_show')::int AS no_show,
+              COUNT(*) FILTER (WHERE source = 'online')::int AS online
        FROM agenda_turnos
        WHERE date BETWEEN $1 AND $2${tenantClause}
        GROUP BY date
@@ -2534,6 +2537,63 @@ app.post("/agenda/:id/photo", async (req, res) => {
   }
 });
 
+// ── Bloqueos de horario (la web de reservas no ofrece esas franjas) ─────────
+
+const agendaBlockSchema = z
+  .object({
+    date: dateSchema,
+    start_time: timeSchema,
+    end_time: timeSchema,
+    reason: z.string().trim().max(200).optional().nullable()
+  })
+  .refine((b) => b.start_time < b.end_time, { message: "start_time must be before end_time" });
+
+const AGENDA_BLOCK_COLUMNS = `id, to_char(date, 'YYYY-MM-DD') AS date,
+  to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time, reason`;
+
+app.get("/v2/agenda/blocks", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const from = dateSchema.safeParse(req.query.from);
+  const to = dateSchema.safeParse(req.query.to);
+  if (!from.success || !to.success) return sendError(res, 400, "Invalid date range");
+  try {
+    const result = await pool.query(
+      `SELECT ${AGENDA_BLOCK_COLUMNS} FROM agenda_blocks
+       WHERE tenant_id = $1 AND date BETWEEN $2 AND $3 ORDER BY date, start_time`,
+      [req.tenantId, from.data, to.data]
+    );
+    res.json(result.rows);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.post("/v2/agenda/blocks", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = agendaBlockSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, "Invalid request body");
+  const { date, start_time, end_time, reason } = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO agenda_blocks (tenant_id, date, start_time, end_time, reason, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${AGENDA_BLOCK_COLUMNS}`,
+      [req.tenantId, date, start_time, end_time, reason ?? null, req.user?.sub ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
+app.delete("/v2/agenda/blocks/:id", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  if (!z.string().uuid().safeParse(req.params.id).success) return sendError(res, 404, "Block not found");
+  try {
+    const result = await pool.query(
+      `DELETE FROM agenda_blocks WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId]
+    );
+    if (result.rowCount === 0) return sendError(res, 404, "Block not found");
+    res.json({ ok: true });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
 app.get("/v2/service-types", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const filters = [];
@@ -2664,6 +2724,19 @@ app.get("/v2/booking/settings", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
+// Link público para mostrar en la agenda: lo ve todo el equipo, no solo admin.
+app.get("/v2/booking/link", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  try {
+    const result = await pool.query(
+      `SELECT slug, enabled FROM booking_settings WHERE tenant_id = $1`,
+      [req.tenantId]
+    );
+    const row = result.rows[0];
+    res.json({ slug: row?.slug ?? null, enabled: Boolean(row?.enabled && row?.slug) });
+  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+});
+
 app.put("/v2/booking/settings", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = bookingSettingsSchema.safeParse(req.body);
@@ -2745,6 +2818,7 @@ app.post("/v2/booking/closed-days", requireRole("admin"), async (req, res) => {
 
 app.delete("/v2/booking/closed-days/:id", requireRole("admin"), async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  if (!z.string().uuid().safeParse(req.params.id).success) return sendError(res, 404, "Closed day not found");
   try {
     const result = await pool.query(
       `DELETE FROM booking_closed_days WHERE id = $1 AND tenant_id = $2`,

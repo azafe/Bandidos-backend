@@ -141,6 +141,24 @@ function maxConcurrent(appointments, start, end) {
   return max;
 }
 
+// Une franjas que se tocan o se superponen: 09-13 y 13-20 son una sola
+// franja de atención, y un servicio de 11:30 a 13:30 entra.
+function mergeRanges(ranges) {
+  const sorted = ranges
+    .map((r) => ({ start: timeToMinutes(r.start_time), end: timeToMinutes(r.end_time) }))
+    .sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const r of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      merged.push({ ...r });
+    }
+  }
+  return merged;
+}
+
 // Horarios de inicio libres de un día para un servicio de `duration` minutos.
 //
 // ranges:       franjas de atención del día [{start_time, end_time}]
@@ -180,10 +198,8 @@ export function computeDaySlots({
   const blocked = blocks.map((b) => ({ start: timeToMinutes(b.start_time), end: timeToMinutes(b.end_time) }));
 
   const slots = new Set();
-  for (const range of ranges) {
-    const rangeStart = timeToMinutes(range.start_time);
-    const rangeEnd = timeToMinutes(range.end_time);
-    for (let start = rangeStart; start + duration <= rangeEnd; start += interval) {
+  for (const range of mergeRanges(ranges)) {
+    for (let start = range.start; start + duration <= range.end; start += interval) {
       const end = start + duration;
       if (start < earliest) continue;
       if (blocked.some((b) => b.start < end && start < b.end)) continue;
