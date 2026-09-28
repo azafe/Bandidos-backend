@@ -111,10 +111,24 @@ export function summarizeServiceOffer(serviceType) {
   const durations = offers.map((o) => o.duration);
   return {
     price_from: prices.length ? Math.min(...prices) : null,
+    price_to: prices.length ? Math.max(...prices) : null,
     duration_min: Math.min(...durations),
     duration_max: Math.max(...durations),
     varies_by_size: BOOKING_SIZES.some((s) => serviceType?.size_pricing?.[s])
   };
+}
+
+// Oferta cuando el cliente no sabe el tamaño del perro (lo define el local al
+// atenderlo): se reserva la duración más larga para no quedarse corto de
+// tiempo, y el precio queda sin fijar (el cliente ve el rango).
+export function offerForUnknownSize(serviceType) {
+  const summary = summarizeServiceOffer(serviceType);
+  return { price: null, duration: summary.duration_max };
+}
+
+// Tamaño elegido por el cliente o, si no lo sabe, la oferta sin tamaño.
+export function resolveBookingOffer(serviceType, size) {
+  return size ? resolveServiceOffer(serviceType, size) : offerForUnknownSize(serviceType);
 }
 
 // ── Disponibilidad ─────────────────────────────────────────────────────────
@@ -294,7 +308,8 @@ const requiredText = (max) => z.string().trim().min(1).max(max);
 
 export const reservationSchema = z.object({
   service_type_id: z.string().uuid(),
-  size: z.enum(BOOKING_SIZES),
+  // Opcional: el tamaño lo define el local al atender al perro.
+  size: z.enum(BOOKING_SIZES).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   time: hhmm,
   owner_name: requiredText(120),
@@ -333,6 +348,35 @@ export function minutesUntil({ date, time }, now) {
 export function canCancelReservation(turno, cancelHours, now) {
   if (turno.status !== "reserved") return false;
   return minutesUntil(turno, now) >= cancelHours * 60;
+}
+
+// Último momento en que el cliente puede cancelar solo: el turno menos
+// `cancelHours` horas. Devuelve { date, time } en hora de Argentina.
+export function cancelDeadline({ date, time }, cancelHours) {
+  let minutes = timeToMinutes(time) - cancelHours * 60;
+  let days = 0;
+  while (minutes < 0) {
+    minutes += 1440;
+    days -= 1;
+  }
+  return { date: addDays(date, days), time: minutesToTime(minutes) };
+}
+
+// Estado de un día para la tira de días: cerrado (no se atiende), completo
+// (se atiende pero no queda lugar) o con lugar.
+export function dayStatus({ closed, hasRanges, slots }) {
+  if (closed || !hasRanges) return "closed";
+  return slots.length ? "open" : "full";
+}
+
+// Hasta `count` horarios libres alternativos, los más cercanos al pedido.
+export function nearestSlots(slots, wanted, count = 3) {
+  const target = timeToMinutes(wanted);
+  return [...slots]
+    .filter((s) => s !== wanted)
+    .sort((a, b) => Math.abs(timeToMinutes(a) - target) - Math.abs(timeToMinutes(b) - target) || a.localeCompare(b))
+    .slice(0, count)
+    .sort();
 }
 
 const escapeHtml = (text) =>
