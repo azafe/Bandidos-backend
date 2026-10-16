@@ -1,4 +1,5 @@
--- Solo lectura. Ejecutar DESPUÉS de aplicar la estructura 025.
+-- Solo lectura. Corte autorizado: hasta el 15/10/2026 inclusive.
+-- Los del 16/10 en adelante quedan fuera. Ejecutar después de estructura 025.
 -- Presentar estos resultados y el INSERT propuesto antes de autorizar backfill.
 -- No se conoce aún la cantidad de filas reales; este archivo no importa nada.
 -- Reemplazá NULL por el UUID del local autorizado. Sin ese dato no devuelve
@@ -13,6 +14,7 @@ SELECT a.tenant_id,
 FROM agenda_turnos a
 WHERE a.tenant_id = (SELECT tenant_id FROM local_objetivo)
   AND a.traslado = true
+  AND a.date <= DATE '2026-10-15'
   AND NOT EXISTS (
     SELECT 1 FROM traslado_solicitudes s
     WHERE s.tenant_id = a.tenant_id AND s.turno_id = a.id
