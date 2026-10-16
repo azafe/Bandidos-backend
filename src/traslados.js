@@ -200,7 +200,10 @@ export async function loadSolicitud(db, tenant, solicitudId) {
       [tenant, solicitudId],
     ),
   ]);
-  return { ...rows[0], tramos: tramos.rows, cobro: cobros.rows[0] || null };
+  const historico = rows[0].origen === "historico"
+    ? await db.query("SELECT * FROM traslado_historicos WHERE tenant_id=$1 AND solicitud_id=$2", [tenant, solicitudId])
+    : null;
+  return { ...rows[0], tramos: tramos.rows, cobro: cobros.rows[0] || null, ...(historico ? { historico: historico.rows[0] || null } : {}) };
 }
 async function lockTurno(db, tenant, turnoId) {
   const { rows } = await db.query(
@@ -252,6 +255,7 @@ const transitions = {
   cancelado: ["cancelado", "pendiente"],
 };
 export async function saveSolicitud(db, tenant, turno, input, previous = null) {
+  if (previous?.origen === "historico") fail(409, "El traslado importado conserva su historia y no se edita como un viaje pendiente.");
   const value = parse(solicitudSchema, input);
   checkPrice(value, turno.status === "finished");
   if (previous?.cancelado)
@@ -400,6 +404,7 @@ export async function saveSolicitud(db, tenant, turno, input, previous = null) {
   return loadSolicitud(db, tenant, solicitudId);
 }
 async function cancelSolicitud(db, tenant, turno, previous) {
+  if (previous.origen === "historico") fail(409, "El traslado importado conserva su historia; no se cancela como un viaje nuevo.");
   if (
     previous.cobro ||
     previous.tramos.some((t) => !["pendiente", "cancelado"].includes(t.estado))
@@ -436,6 +441,17 @@ export async function syncAgendaTraslado(
   const previous = rows.rows[0]
     ? await loadSolicitud(db, tenant, rows.rows[0].id)
     : null;
+  if (previous?.origen === "historico") {
+    // Las notas del grooming pueden corregirse sin reescribir la copia del
+    // traslado ni sus importes. Las correcciones históricas requieren revisión.
+    const protectedFields = ["traslado", "traslado_amount", "traslado_bonificado", "traslado_direccion", "status", "date"];
+    if (changes.traslado_solicitud || protectedFields.some((key) => {
+      if (!Object.hasOwn(changes, key)) return false;
+      return key === "traslado_amount" ? Number(changes[key]) !== Number(previousTurno?.[key])
+        : changes[key] !== previousTurno?.[key];
+    })) fail(409, "Este traslado ya se importó como histórico. Sus datos originales requieren una corrección revisada.");
+    return previous;
+  }
   if (!previous) {
     if (!turno.traslado) return null;
     if (isNew && ["cancelled", "no_show"].includes(turno.status))
@@ -519,12 +535,15 @@ export function tramoInput(t) {
   };
 }
 
-// La selección de legado es excluyente: una operación propia reemplaza su
-// resumen, nunca se suman ambas fuentes. La fecha nueva es la del cobro real.
+// Una importación conserva la interpretación anterior y su fecha de referencia,
+// sin inventar un recibo. Las operaciones nuevas usan la fecha del cobro real.
 export async function cobradoEnPeriodo(db, tenant, from, to, cobrador = null) {
   const result = await db.query(
     `SELECT COALESCE(SUM(amount),0) AS amount FROM (
     SELECT c.monto AS amount FROM traslado_cobros c WHERE c.tenant_id=$1 AND c.fecha BETWEEN $2 AND $3 AND ($4::text IS NULL OR c.cobrado_por=$4)
+    UNION ALL
+    SELECT h.monto FROM traslado_historicos h WHERE h.tenant_id=$1 AND h.fecha BETWEEN $2 AND $3
+    AND h.turno_status='finished' AND ($4::text IS NULL OR $4='chofer')
     UNION ALL
     SELECT a.traslado_amount FROM agenda_turnos a WHERE a.tenant_id=$1 AND a.date BETWEEN $2 AND $3
     AND a.status='finished' AND a.traslado=true AND ($4::text IS NULL OR $4='chofer')
@@ -784,6 +803,7 @@ export function registerTrasladosRoutes(app, pool, requireRole) {
           req.tenantId,
           paramId(req),
         );
+        if (solicitud.origen === "historico") fail(409, "El histórico no genera un cobro nuevo. Se conserva su tratamiento anterior.");
         if (
           solicitud.cancelado ||
           ["cancelled", "no_show"].includes(turno.status) ||

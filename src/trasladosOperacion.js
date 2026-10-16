@@ -79,6 +79,7 @@ export function registerTrasladosOperacionRoutes(app, pool, requireRole) {
       [req.tenantId, q.fecha, req.driverId || q.chofer_id || null, q.vehiculo_id || null],
     );
     let historicos = 0;
+    let historial = [];
     if (!req.driverId) {
       const legacy = await pool.query(
         `SELECT count(*) AS count FROM agenda_turnos a WHERE a.tenant_id=$1 AND a.date=$2
@@ -87,8 +88,15 @@ export function registerTrasladosOperacionRoutes(app, pool, requireRole) {
         [req.tenantId, q.fecha],
       );
       historicos = Number(legacy.rows[0].count);
+      if (!q.chofer_id && !q.vehiculo_id) {
+        const imported = await pool.query(
+          "SELECT solicitud_id,turno_id,fecha,turno_status,pet_name,owner_name,monto,bonificado,direccion FROM traslado_historicos WHERE tenant_id=$1 AND fecha=$2 ORDER BY pet_name,turno_id",
+          [req.tenantId, q.fecha],
+        );
+        historial = imported.rows;
+      }
     }
-    res.json({ items: result.rows, historicos_pendientes: historicos });
+    res.json({ items: result.rows, historicos_pendientes: historicos, historial });
   }));
 
   app.put("/v2/traslados/orden-ruta", requireRole("admin"), route(async (req, res) => {
@@ -133,6 +141,7 @@ export function registerTrasladosOperacionRoutes(app, pool, requireRole) {
       );
       if (!found.rows.length) fail(404, "Tramo no encontrado.");
       const { turno, solicitud } = await lockSolicitud(db, req.tenantId, found.rows[0].solicitud_id);
+      if (solicitud.origen === "historico") fail(409, "El histórico no es un traslado pendiente: su estado operativo no está registrado.");
       const target = solicitud.tramos.find((t) => t.id === id);
       // Revalidar después del bloqueo: la asignación puede haber cambiado.
       if (!target || (req.driverId && target.chofer_id !== req.driverId)) fail(404, "Tramo no encontrado.");

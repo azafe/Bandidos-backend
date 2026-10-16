@@ -20,6 +20,7 @@ import { solicitudSchema, applySolicitudSummary, syncAgendaTraslado, registerTra
   cobradoEnPeriodo, cobrosDeCaja, sendTrasladoError, transaction } from "./traslados.js";
 import { registerTrasladosOperacionRoutes, restrictDriverAccess, validateDriver } from "./trasladosOperacion.js";
 import { tenantPushAudience } from "./pushAudience.js";
+import { registerTrasladosHistoricosRoutes } from "./trasladosHistoricos.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -1331,6 +1332,7 @@ app.use((req, res, next) => {
 
 app.use(restrictDriverAccess);
 // Las rutas fijas deben registrarse antes de /v2/traslados/:id.
+registerTrasladosHistoricosRoutes(app, pool, requireRole);
 registerTrasladosOperacionRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
 
@@ -2784,7 +2786,7 @@ app.put("/agenda/:id", async (req, res) => {
   let previousTurno;
   try {
     const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado", "traslado_solicitud"];
-    const checksTraslado = ["finished", "cancelled", "no_show"].includes(updates.status) || trasladoFields.some((field) => Object.hasOwn(updates, field));
+    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || trasladoFields.some((field) => Object.hasOwn(updates, field));
     if (checksTraslado) {
       client = await pool.connect();
       await client.query("BEGIN");
