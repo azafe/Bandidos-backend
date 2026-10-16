@@ -210,7 +210,7 @@ async function lockTurno(db, tenant, turnoId) {
   if (!rows.length) fail(404, "Turno no encontrado.");
   return rows[0];
 }
-async function lockSolicitud(db, tenant, solicitudId) {
+export async function lockSolicitud(db, tenant, solicitudId) {
   const found = await db.query(
     "SELECT turno_id FROM traslado_solicitudes WHERE tenant_id = $1 AND id = $2",
     [tenant, solicitudId],
@@ -251,7 +251,7 @@ const transitions = {
   entregado: ["entregado"],
   cancelado: ["cancelado", "pendiente"],
 };
-async function saveSolicitud(db, tenant, turno, input, previous = null) {
+export async function saveSolicitud(db, tenant, turno, input, previous = null) {
   const value = parse(solicitudSchema, input);
   checkPrice(value, turno.status === "finished");
   if (previous?.cancelado)
@@ -362,6 +362,9 @@ async function saveSolicitud(db, tenant, turno, input, previous = null) {
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       ON CONFLICT(tenant_id,solicitud_id,tipo) DO UPDATE SET chofer_id=EXCLUDED.chofer_id,vehiculo_id=EXCLUDED.vehiculo_id,
       zona_id=EXCLUDED.zona_id,direccion=EXCLUDED.direccion,fecha_programada=EXCLUDED.fecha_programada,hora_programada=EXCLUDED.hora_programada,
+      orden_ruta=CASE WHEN (traslados.chofer_id,traslados.vehiculo_id,traslados.fecha_programada)
+        IS DISTINCT FROM (EXCLUDED.chofer_id,EXCLUDED.vehiculo_id,EXCLUDED.fecha_programada)
+        THEN NULL ELSE traslados.orden_ruta END,
       estado=EXCLUDED.estado,notas=EXCLUDED.notas,updated_at=now()`,
       [
         tenant,

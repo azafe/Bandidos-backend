@@ -18,6 +18,8 @@ import { z } from "zod";
 import { pool } from "./db.js";
 import { solicitudSchema, applySolicitudSummary, syncAgendaTraslado, registerTrasladosRoutes,
   cobradoEnPeriodo, cobrosDeCaja, sendTrasladoError, transaction } from "./traslados.js";
+import { registerTrasladosOperacionRoutes, restrictDriverAccess, validateDriver } from "./trasladosOperacion.js";
+import { tenantPushAudience } from "./pushAudience.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -78,10 +80,7 @@ function formatPushPrice(price) {
 async function sendPushToTenant(tenantId, payload, excludeDeviceId = null) {
   if (!vapidConfigured) return;
   try {
-    const { rows } = await pool.query(
-      `SELECT device_id, endpoint, p256dh, auth FROM push_subscriptions WHERE tenant_id = $1`,
-      [tenantId]
-    );
+    const { rows } = await tenantPushAudience(pool, tenantId);
     const message = JSON.stringify(payload);
     for (const sub of rows) {
       if (excludeDeviceId && sub.device_id === excludeDeviceId) continue;
@@ -126,7 +125,8 @@ const createUserSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8).optional(),
   password_hash: z.string().min(1).optional(),
-  role: assignableUserRoles
+  role: assignableUserRoles,
+  chofer_id: z.string().uuid().nullable().optional()
 }).refine((data) => data.password || data.password_hash, {
   message: "password or password_hash is required"
 });
@@ -774,6 +774,7 @@ app.post("/auth/login", async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        chofer_id: user.chofer_id ?? null,
         tenant_id: user.tenant_id ?? null,
         created_at: user.created_at
       }
@@ -1273,9 +1274,11 @@ app.use((req, res, next) => {
   if (!userId) return sendError(res, 401, "Unauthorized");
 
   pool.query(
-    `SELECT u.role, u.tenant_id, t.status AS tenant_status, t.suspended_reason
+    `SELECT u.role, u.tenant_id, t.status AS tenant_status, t.suspended_reason,
+            u.chofer_id, e.status AS chofer_status, e.is_driver
      FROM users u
      LEFT JOIN tenants t ON t.id = u.tenant_id
+     LEFT JOIN employees e ON e.tenant_id=u.tenant_id AND e.id=u.chofer_id
      WHERE u.id = $1`,
     [userId]
   )
@@ -1287,6 +1290,8 @@ app.use((req, res, next) => {
       const row = rows[0];
       req.user.role = row.role;
       req.tenantId = row.tenant_id ?? null;
+      req.driverId = row.chofer_id ?? null;
+      req.driverActive = row.chofer_status === "active" && row.is_driver === true;
 
       // Si es super_admin y NO está en una ruta de superadmin (/v2/super/...),
       // ni en /me o /health, bloqueamos el acceso.
@@ -1324,6 +1329,9 @@ app.use((req, res, next) => {
     });
 });
 
+app.use(restrictDriverAccess);
+// Las rutas fijas deben registrarse antes de /v2/traslados/:id.
+registerTrasladosOperacionRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
 
 app.post("/push/subscribe", async (req, res) => {
@@ -1338,11 +1346,11 @@ app.post("/push/subscribe", async (req, res) => {
   if (!parsed.success) return sendError(res, 400, "Invalid subscription data");
   const { device_id, endpoint, p256dh, auth } = parsed.data;
   await pool.query(
-    `INSERT INTO push_subscriptions (tenant_id, device_id, endpoint, p256dh, auth)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO push_subscriptions (tenant_id, device_id, endpoint, p256dh, auth, user_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (tenant_id, device_id)
-     DO UPDATE SET endpoint = $3, p256dh = $4, auth = $5`,
-    [req.tenantId, device_id, endpoint, p256dh, auth]
+     DO UPDATE SET endpoint = $3, p256dh = $4, auth = $5, user_id = $6`,
+    [req.tenantId, device_id, endpoint, p256dh, auth, req.user.sub]
   );
   res.status(201).json({ ok: true });
 });
@@ -1437,7 +1445,7 @@ app.get("/me", requireAuth, async (req, res) => {
       return sendError(res, 404, "User not found");
     }
 
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], chofer_id: req.driverId, chofer_activo: req.driverActive });
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -1829,7 +1837,7 @@ app.get("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
   const tenantClause = req.tenantId ? `WHERE tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      `SELECT id, email, role, tenant_id, created_at FROM users ${tenantClause} ORDER BY created_at DESC`,
+      `SELECT id, email, role, tenant_id, created_at, chofer_id FROM users ${tenantClause} ORDER BY created_at DESC`,
       params
     );
     res.json(result.rows);
@@ -1844,7 +1852,7 @@ app.get("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => 
   const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      `SELECT id, email, role, tenant_id, created_at FROM users WHERE id = $1${tenantClause}`,
+      `SELECT id, email, role, tenant_id, created_at, chofer_id FROM users WHERE id = $1${tenantClause}`,
       params
     );
     if (result.rowCount === 0) {
@@ -1864,10 +1872,23 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const { email, password, password_hash, role } = parsed.data;
+  const { email, password, password_hash, role, chofer_id } = parsed.data;
   const passwordHash = password ? await hashPassword(password) : password_hash;
 
   try {
+    if (chofer_id) {
+      if (!["staff", "user"].includes(role)) return sendError(res, 400, "Usá una cuenta de equipo para el acceso de chofer.");
+      const user = await transaction(pool, async (db) => {
+        await validateDriver(db, req.tenantId, chofer_id);
+        const saved = await db.query(
+          `INSERT INTO users(email,password_hash,role,tenant_id,chofer_id)
+           VALUES($1,$2,$3,$4,$5) RETURNING id,email,role,tenant_id,created_at,chofer_id`,
+          [email, passwordHash, role, req.tenantId, chofer_id],
+        );
+        return saved.rows[0];
+      });
+      return res.status(201).json(user);
+    }
     const result = await pool.query(
       `INSERT INTO users (email, password_hash, role, tenant_id)
        VALUES ($1, $2, $3, $4)
@@ -1876,6 +1897,7 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }

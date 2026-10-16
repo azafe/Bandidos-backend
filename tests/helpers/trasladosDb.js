@@ -4,11 +4,11 @@ import { handleAuthRevalidation } from "./authRevalidation.js";
 
 // PostgreSQL real embebido: los CHECK, FK compuestos, transacciones y agregados
 // se ejecutan, en lugar de repetir la implementación en un doble de SQL.
-export async function createTrasladosDb() {
+export async function createTrasladosDb({ realAuth = false } = {}) {
   const db = new PGlite({ parsers: { 1082: (value) => value } });
   await db.exec(`
-    CREATE TABLE tenants(id uuid PRIMARY KEY);
-    CREATE TABLE users(id uuid PRIMARY KEY, tenant_id uuid REFERENCES tenants(id));
+    CREATE TABLE tenants(id uuid PRIMARY KEY,status text DEFAULT 'active',suspended_reason text,name text,logo_url text,primary_color text,secondary_color text,enabled_modules jsonb);
+    CREATE TABLE users(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid REFERENCES tenants(id),role text,email text UNIQUE,password_hash text,created_at timestamptz DEFAULT now());
     CREATE TABLE employees(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),name text,role text,phone text,email text,status text DEFAULT 'active',notes text,commission_rate numeric DEFAULT 0.40,created_at timestamptz DEFAULT now());
     CREATE TABLE payment_methods(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),name text,created_at timestamptz DEFAULT now());
     CREATE TABLE customers(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,name text,phone text);
@@ -18,6 +18,7 @@ export async function createTrasladosDb() {
     CREATE TABLE agenda_turnos(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),date date NOT NULL,time time NOT NULL,duration integer DEFAULT 60,pet_id uuid,pet_name text,breed text,owner_name text,service_type_id uuid,payment_method_id uuid,deposit_payment_method_id uuid,price numeric,deposit_amount numeric NOT NULL DEFAULT 0,notes text,groomer_id uuid,status text DEFAULT 'reserved',traslado boolean NOT NULL DEFAULT false,traslado_direccion text,traslado_amount numeric NOT NULL DEFAULT 0,created_at timestamptz DEFAULT now());
     CREATE TABLE services(tenant_id uuid,date date,payment_method_id uuid,price numeric);
     CREATE TABLE petshop_sales(tenant_id uuid,date date,payment_method_id uuid,total numeric);
+    CREATE TABLE push_subscriptions(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,device_id text,endpoint text,p256dh text,auth text,UNIQUE(tenant_id,device_id));
   `);
   await db.exec(
     await readFile(
@@ -34,6 +35,9 @@ export async function createTrasladosDb() {
   );
   await db.exec(migration);
   await db.exec(migration);
+  const operationMigration = await readFile(new URL("../../db/migrations/026_traslados_operacion.sql", import.meta.url), "utf8");
+  await db.exec(operationMigration);
+  await db.exec(operationMigration);
   let tail = Promise.resolve();
   const acquire = async () => {
     const previous = tail;
@@ -45,7 +49,7 @@ export async function createTrasladosDb() {
     return release;
   };
   const query = async (sql, params = []) => {
-    const auth = handleAuthRevalidation(sql, params);
+    const auth = realAuth ? null : handleAuthRevalidation(sql, params);
     if (auth) return auth;
     const result = await db.query(sql, params);
     return { ...result, rowCount: result.affectedRows || result.rows.length };
