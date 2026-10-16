@@ -225,7 +225,8 @@ const createAgendaSchema = z.object({
   status: agendaStatusSchema.optional().default("reserved"),
   traslado: z.boolean().optional().default(false),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
-  traslado_amount: z.coerce.number().min(0).optional().default(0),
+  traslado_amount: z.coerce.number().finite().min(0).optional().default(0),
+  traslado_bonificado: z.boolean().optional().default(false),
 });
 
 const dayNoteSchema = z.object({
@@ -247,7 +248,8 @@ const createAgendaWithNewPetSchema = z.object({
   status: agendaStatusSchema.optional().default("reserved"),
   traslado: z.boolean().optional().default(false),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
-  traslado_amount: z.coerce.number().min(0).optional().default(0),
+  traslado_amount: z.coerce.number().finite().min(0).optional().default(0),
+  traslado_bonificado: z.boolean().optional().default(false),
   pet_name: z.string().min(1),
   pet_breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   owner_name: z.string().min(1),
@@ -272,8 +274,32 @@ const updateAgendaSchema = z.object({
   status: agendaStatusSchema.optional(),
   traslado: z.boolean().optional(),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
-  traslado_amount: z.coerce.number().min(0).optional(),
+  traslado_amount: z.coerce.number().finite().min(0).optional(),
+  traslado_bonificado: z.boolean().optional(),
 });
+
+// Los ceros históricos no prueban una bonificación. Solo exigimos la decisión
+// al finalizar o cambiar los datos del traslado de un turno ya finalizado.
+const finishedTrasladoSchema = z.object({
+  status: agendaStatusSchema,
+  traslado: z.boolean(),
+  traslado_amount: z.coerce.number().finite().min(0),
+  traslado_bonificado: z.boolean().nullable().optional(),
+}).superRefine((turno, ctx) => {
+  if (turno.status !== "finished" || !turno.traslado) return;
+  if (turno.traslado_bonificado === true && turno.traslado_amount !== 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["traslado_amount"], message: "Un traslado bonificado debe tener monto cero." });
+  } else if (turno.traslado_bonificado !== true && turno.traslado_amount <= 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["traslado_amount"], message: "Cargá el monto del traslado o marcá Bonificado." });
+  }
+});
+
+function validateFinishedTraslado(res, turno) {
+  const parsed = finishedTrasladoSchema.safeParse(turno);
+  if (parsed.success) return true;
+  res.status(400).json({ status: 400, message: "Revisá el monto del traslado o la opción Bonificado.", errors: parsed.error.flatten().fieldErrors });
+  return false;
+}
 
 const createPetshopProductSchema = z.object({
   name: z.string().min(1),
@@ -2555,6 +2581,8 @@ app.post("/agenda", async (req, res) => {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
+  if (!validateFinishedTraslado(res, parsed.data)) return;
+
   const {
     date,
     time,
@@ -2573,7 +2601,8 @@ app.post("/agenda", async (req, res) => {
     status,
     traslado,
     traslado_direccion,
-    traslado_amount
+    traslado_amount,
+    traslado_bonificado
   } = parsed.data;
 
   try {
@@ -2581,14 +2610,14 @@ app.post("/agenda", async (req, res) => {
       `INSERT INTO agenda_turnos
        (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
         payment_method_id, deposit_payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
-        traslado, traslado_direccion, traslado_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        traslado, traslado_direccion, traslado_amount, traslado_bonificado)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
        RETURNING *`,
       [
         date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
         service_type_id, payment_method_id ?? null, deposit_payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
         notes ?? null, groomer_id ?? null, status, req.tenantId,
-        traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0
+        traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0, traslado_bonificado
       ]
     );
     const turnoCreado = result.rows[0];
@@ -2611,10 +2640,12 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
+  if (!validateFinishedTraslado(res, parsed.data)) return;
+
   const {
     date, time, duration, service_type_id, payment_method_id, deposit_payment_method_id, price,
     deposit_amount, notes, groomer_id, status, traslado, traslado_direccion,
-    traslado_amount, pet_name, pet_breed, owner_name, owner_phone,
+    traslado_amount, traslado_bonificado, pet_name, pet_breed, owner_name, owner_phone,
   } = parsed.data;
   const tenantId = req.tenantId;
   const client = await pool.connect();
@@ -2639,14 +2670,14 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
       `INSERT INTO agenda_turnos
          (date, time, duration, pet_id, pet_name, breed, owner_name,
           service_type_id, payment_method_id, deposit_payment_method_id, price, deposit_amount, notes,
-          groomer_id, status, tenant_id, traslado, traslado_direccion, traslado_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+          groomer_id, status, tenant_id, traslado, traslado_direccion, traslado_amount, traslado_bonificado)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING *`,
       [
         date, time, duration, petId, pet_name, pet_breed ?? null, owner_name,
         service_type_id ?? null, payment_method_id ?? null, deposit_payment_method_id ?? null, price ?? null,
         deposit_amount ?? 0, notes ?? null, groomer_id ?? null, status ?? "reserved",
-        tenantId, traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0,
+        tenantId, traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0, traslado_bonificado,
       ]
     );
 
@@ -2695,7 +2726,8 @@ app.put("/agenda/:id", async (req, res) => {
       "status",
       "traslado",
       "traslado_direccion",
-      "traslado_amount"
+      "traslado_amount",
+      "traslado_bonificado"
     ],
     updates
   );
@@ -2704,18 +2736,56 @@ app.put("/agenda/:id", async (req, res) => {
     return sendError(res, 400, "No fields to update");
   }
 
+  let client;
   try {
+    const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado"];
+    const checksTraslado = updates.status === "finished" || trasladoFields.some((field) => Object.hasOwn(updates, field));
+    if (checksTraslado) {
+      client = await pool.connect();
+      await client.query("BEGIN");
+      const current = await client.query(
+        `SELECT * FROM agenda_turnos WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+        [req.params.id, req.tenantId]
+      );
+      if (current.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return sendError(res, 404, "Agenda item not found");
+      }
+      const previous = current.rows[0];
+      const next = { ...previous, ...updates };
+      const changedTraslado = trasladoFields.some((field) => {
+        if (!Object.hasOwn(updates, field)) return false;
+        return field === "traslado_amount"
+          ? Number(previous[field]) !== updates[field]
+          : previous[field] !== updates[field];
+      });
+      if ((previous.status !== "finished" || changedTraslado) && !validateFinishedTraslado(res, next)) {
+        await client.query("ROLLBACK");
+        return;
+      }
+    }
+    const db = client || pool;
     values.push(req.params.id);
     const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
 
-    const result = await pool.query(
+    const result = await db.query(
       `UPDATE agenda_turnos SET ${fields.join(", ")}
        WHERE id = $${idx}${tenantClause}
        RETURNING *`,
       values
     );
 
-    if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
+    if (result.rowCount === 0) {
+      if (client) await client.query("ROLLBACK");
+      return sendError(res, 404, "Agenda item not found");
+    }
+    if (client) {
+      await client.query("COMMIT");
+      // Las notificaciones consultan el pool: liberar antes evita agotarlo
+      // cuando varios turnos se finalizan al mismo tiempo.
+      client.release();
+      client = null;
+    }
     const turno = result.rows[0];
 
     if (updates.status === "finished" && turno.pet_id) {
@@ -2731,8 +2801,8 @@ app.put("/agenda/:id", async (req, res) => {
       let serviceName = null;
       if (turno.service_type_id) {
         const svcResult = await pool.query(
-          `SELECT name FROM service_types WHERE id = $1`,
-          [turno.service_type_id]
+          `SELECT name FROM service_types WHERE id = $1 AND tenant_id = $2`,
+          [turno.service_type_id, req.tenantId]
         );
         serviceName = svcResult.rows[0]?.name || null;
       }
@@ -2744,8 +2814,11 @@ app.put("/agenda/:id", async (req, res) => {
       }, deviceId);
     }
   } catch (err) {
+    if (client) await client.query("ROLLBACK");
     console.error(err);
     sendError(res, 500, "Unexpected error");
+  } finally {
+    client?.release();
   }
 });
 
@@ -5028,6 +5101,26 @@ app.post("/v2/daily-incomes", async (req, res) => {
   }
 });
 
+// Informativo separado de caja; el medio de pago del servicio no identifica
+// cómo cobró el chofer, y puede faltar aun cuando sí hubo un traslado cobrado.
+app.get("/v2/daily-incomes/traslados-summary", async (req, res) => {
+  if (!req.tenantId) return sendError(res, 403, "No tenant context");
+  const parsed = dateSchema.safeParse(typeof req.query.date === "string" ? req.query.date.trim() : "");
+  if (!parsed.success) return sendError(res, 400, "Invalid date");
+  try {
+    const result = await pool.query(
+      `SELECT COALESCE(SUM(traslado_amount), 0) AS amount
+       FROM agenda_turnos
+       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND traslado = true`,
+      [parsed.data, req.tenantId]
+    );
+    res.json({ amount: Number(result.rows[0].amount) });
+  } catch (err) {
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  }
+});
+
 app.get("/v2/daily-incomes/system-totals", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const date = typeof req.query.date === "string" ? req.query.date.trim() : "";
@@ -5068,14 +5161,7 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
       [queryDate, tenantId]
     );
 
-    // 4. Traslados desde agenda_turnos (status = finished, traslado = true, traslado_amount > 0)
-    const agendaTraslados = await pool.query(
-      `SELECT payment_method_id, SUM(COALESCE(traslado_amount, 0)) AS total
-       FROM agenda_turnos
-       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND traslado = true AND traslado_amount > 0 AND payment_method_id IS NOT NULL
-       GROUP BY payment_method_id`,
-      [queryDate, tenantId]
-    );
+    // Los traslados los cobran los choferes: no son ingresos de caja.
 
     // 5. Ventas PetShop desde petshop_sales
     const petshopSales = await pool.query(
@@ -5107,10 +5193,6 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
     // Agregar señas de agenda turnos
     for (const r of agendaDeposits.rows) {
       addValue("señas", r.payment_method_id, r.total);
-    }
-    // Agregar traslados
-    for (const r of agendaTraslados.rows) {
-      addValue("traslados", r.payment_method_id, r.total);
     }
     // Agregar ventas petshop
     for (const r of petshopSales.rows) {
