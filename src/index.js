@@ -16,6 +16,8 @@ import jwt from "jsonwebtoken";
 import webpush from "web-push";
 import { z } from "zod";
 import { pool } from "./db.js";
+import { solicitudSchema, applySolicitudSummary, syncAgendaTraslado, registerTrasladosRoutes,
+  cobradoEnPeriodo, cobrosDeCaja, sendTrasladoError, transaction } from "./traslados.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -144,6 +146,7 @@ const emptyStringToNull = (value) => {
 };
 
 const createEmployeeSchema = z.object({
+  is_driver: z.boolean().optional(),
   name: z.string().min(1),
   role: z.string().min(1),
   phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -156,6 +159,7 @@ const createEmployeeSchema = z.object({
 });
 
 const updateEmployeeSchema = z.object({
+  is_driver: z.boolean().optional(),
   name: z.string().min(1).optional(),
   role: z.string().min(1).optional(),
   phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
@@ -227,6 +231,7 @@ const createAgendaSchema = z.object({
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
   traslado_amount: z.coerce.number().finite().min(0).optional().default(0),
   traslado_bonificado: z.boolean().optional().default(false),
+  traslado_solicitud: solicitudSchema.optional(),
 });
 
 const dayNoteSchema = z.object({
@@ -250,6 +255,7 @@ const createAgendaWithNewPetSchema = z.object({
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
   traslado_amount: z.coerce.number().finite().min(0).optional().default(0),
   traslado_bonificado: z.boolean().optional().default(false),
+  traslado_solicitud: solicitudSchema.optional(),
   pet_name: z.string().min(1),
   pet_breed: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   owner_name: z.string().min(1),
@@ -276,6 +282,7 @@ const updateAgendaSchema = z.object({
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
   traslado_amount: z.coerce.number().finite().min(0).optional(),
   traslado_bonificado: z.boolean().optional(),
+  traslado_solicitud: solicitudSchema.optional(),
 });
 
 // Los ceros históricos no prueban una bonificación. Solo exigimos la decisión
@@ -1317,6 +1324,8 @@ app.use((req, res, next) => {
     });
 });
 
+registerTrasladosRoutes(app, pool, requireRole);
+
 app.post("/push/subscribe", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const schema = z.object({
@@ -1927,6 +1936,7 @@ app.delete("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) 
     }
     res.json({ ok: true });
   } catch (err) {
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }
@@ -1966,14 +1976,14 @@ app.post("/v2/employees", requireRole("admin"), async (req, res) => {
   const parsed = createEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { name, role, phone, email, status, notes, commission_rate } = parsed.data;
+  const { name, role, phone, email, status, notes, commission_rate, is_driver } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id, commission_rate)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0.40))
+      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id, commission_rate, is_driver)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0.40), $9)
        RETURNING *`,
       [name, role, phone ?? null, email ?? null, status, notes ?? null, req.tenantId,
-       commission_rate ?? null]
+       commission_rate ?? null, is_driver ?? false]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1989,7 +1999,7 @@ app.put("/v2/employees/:id", requireRole("admin"), async (req, res) => {
 
   const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
-    ["name", "role", "phone", "email", "status", "notes", "commission_rate"],
+    ["name", "role", "phone", "email", "status", "notes", "commission_rate", "is_driver"],
     updates
   );
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
@@ -2018,6 +2028,7 @@ app.delete("/v2/employees/:id", requireRole("admin"), async (req, res) => {
     if (result.rowCount === 0) return sendError(res, 404, "Employee not found");
     res.json({ ok: true });
   } catch (err) {
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }
@@ -2581,6 +2592,7 @@ app.post("/agenda", async (req, res) => {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
+  applySolicitudSummary(parsed.data);
   if (!validateFinishedTraslado(res, parsed.data)) return;
 
   const {
@@ -2606,21 +2618,26 @@ app.post("/agenda", async (req, res) => {
   } = parsed.data;
 
   try {
-    const result = await pool.query(
-      `INSERT INTO agenda_turnos
-       (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
-        payment_method_id, deposit_payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
-        traslado, traslado_direccion, traslado_amount, traslado_bonificado)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-       RETURNING *`,
-      [
-        date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
-        service_type_id, payment_method_id ?? null, deposit_payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
-        notes ?? null, groomer_id ?? null, status, req.tenantId,
-        traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0, traslado_bonificado
-      ]
-    );
-    const turnoCreado = result.rows[0];
+    const create = async (db) => {
+      const result = await db.query(
+        `INSERT INTO agenda_turnos
+         (date, time, duration, pet_id, pet_name, breed, owner_name, service_type_id,
+          payment_method_id, deposit_payment_method_id, price, deposit_amount, notes, groomer_id, status, tenant_id,
+          traslado, traslado_direccion, traslado_amount, traslado_bonificado)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+         RETURNING *`,
+        [
+          date, time, duration, pet_id ?? null, pet_name, breed ?? null, owner_name,
+          service_type_id, payment_method_id ?? null, deposit_payment_method_id ?? null, price ?? null, deposit_amount ?? 0,
+          notes ?? null, groomer_id ?? null, status, req.tenantId,
+          traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0, traslado_bonificado
+        ]
+      );
+      const turno = result.rows[0];
+      if (traslado) await syncAgendaTraslado(db, req.tenantId, turno, parsed.data, { isNew: true });
+      return turno;
+    };
+    const turnoCreado = traslado ? await transaction(pool, create) : await create(pool);
     res.status(201).json(turnoCreado);
     const deviceId = req.headers["x-device-id"] || null;
     sendPushToTenant(req.tenantId, {
@@ -2628,6 +2645,7 @@ app.post("/agenda", async (req, res) => {
       body: `${formatPushDate(turnoCreado.date)} · ${String(turnoCreado.time).slice(0, 5)} · ${turnoCreado.pet_name}`,
     }, deviceId);
   } catch (err) {
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }
@@ -2640,6 +2658,7 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
+  applySolicitudSummary(parsed.data);
   if (!validateFinishedTraslado(res, parsed.data)) return;
 
   const {
@@ -2681,8 +2700,9 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
       ]
     );
 
-    await client.query("COMMIT");
     const turno = turnoResult.rows[0];
+    if (traslado) await syncAgendaTraslado(client, tenantId, turno, parsed.data, { isNew: true });
+    await client.query("COMMIT");
     res.status(201).json(turno);
 
     const deviceId = req.headers["x-device-id"] || null;
@@ -2692,6 +2712,7 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
     }, deviceId);
   } catch (err) {
     await client.query("ROLLBACK");
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   } finally {
@@ -2706,6 +2727,7 @@ app.put("/agenda/:id", async (req, res) => {
     return res.status(400).json({ status: 400, message: "Invalid request body", errors: parsed.error.flatten().fieldErrors });
   }
 
+  applySolicitudSummary(parsed.data);
   const updates = parsed.data;
   const { fields, values, idx } = buildUpdate(
     [
@@ -2737,9 +2759,10 @@ app.put("/agenda/:id", async (req, res) => {
   }
 
   let client;
+  let previousTurno;
   try {
-    const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado"];
-    const checksTraslado = updates.status === "finished" || trasladoFields.some((field) => Object.hasOwn(updates, field));
+    const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado", "traslado_solicitud"];
+    const checksTraslado = ["finished", "cancelled", "no_show"].includes(updates.status) || trasladoFields.some((field) => Object.hasOwn(updates, field));
     if (checksTraslado) {
       client = await pool.connect();
       await client.query("BEGIN");
@@ -2752,6 +2775,7 @@ app.put("/agenda/:id", async (req, res) => {
         return sendError(res, 404, "Agenda item not found");
       }
       const previous = current.rows[0];
+      previousTurno = previous;
       const next = { ...previous, ...updates };
       const changedTraslado = trasladoFields.some((field) => {
         if (!Object.hasOwn(updates, field)) return false;
@@ -2780,6 +2804,12 @@ app.put("/agenda/:id", async (req, res) => {
       return sendError(res, 404, "Agenda item not found");
     }
     if (client) {
+      if (result.rows[0].traslado || previousTurno.traslado || updates.traslado_solicitud) {
+        await syncAgendaTraslado(client, req.tenantId, result.rows[0], updates, { previousTurno });
+        // La cancelación puede actualizar también el resumen anterior.
+        const refreshed = await client.query("SELECT * FROM agenda_turnos WHERE id = $1 AND tenant_id = $2", [req.params.id, req.tenantId]);
+        result.rows[0] = refreshed.rows[0];
+      }
       await client.query("COMMIT");
       // Las notificaciones consultan el pool: liberar antes evita agotarlo
       // cuando varios turnos se finalizan al mismo tiempo.
@@ -2815,6 +2845,7 @@ app.put("/agenda/:id", async (req, res) => {
     }
   } catch (err) {
     if (client) await client.query("ROLLBACK");
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   } finally {
@@ -2833,6 +2864,7 @@ app.delete("/agenda/:id", async (req, res) => {
     if (result.rowCount === 0) return sendError(res, 404, "Agenda item not found");
     res.json({ ok: true });
   } catch (err) {
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }
@@ -3224,7 +3256,10 @@ app.delete("/v2/payment-methods/:id", requireRole("admin"), async (req, res) => 
     const result = await pool.query(`DELETE FROM payment_methods WHERE id = $1${tenantClause}`, params);
     if (result.rowCount === 0) return sendError(res, 404, "Payment method not found");
     res.json({ ok: true });
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    if (sendTrasladoError(res, err)) return;
+    console.error(err); sendError(res, 500, "Unexpected error");
+  }
 });
 
 app.get("/v2/petshop/products", async (req, res) => {
@@ -5108,13 +5143,7 @@ app.get("/v2/daily-incomes/traslados-summary", async (req, res) => {
   const parsed = dateSchema.safeParse(typeof req.query.date === "string" ? req.query.date.trim() : "");
   if (!parsed.success) return sendError(res, 400, "Invalid date");
   try {
-    const result = await pool.query(
-      `SELECT COALESCE(SUM(traslado_amount), 0) AS amount
-       FROM agenda_turnos
-       WHERE date = $1 AND tenant_id = $2 AND status = 'finished' AND traslado = true`,
-      [parsed.data, req.tenantId]
-    );
-    res.json({ amount: Number(result.rows[0].amount) });
+    res.json({ amount: await cobradoEnPeriodo(pool, req.tenantId, parsed.data, parsed.data, "chofer") });
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -5161,7 +5190,8 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
       [queryDate, tenantId]
     );
 
-    // Los traslados los cobran los choferes: no son ingresos de caja.
+    // Solo los cobros explícitos recibidos por el local entran a caja.
+    const trasladosLocal = await cobrosDeCaja(pool, tenantId, queryDate);
 
     // 5. Ventas PetShop desde petshop_sales
     const petshopSales = await pool.query(
@@ -5194,6 +5224,7 @@ app.get("/v2/daily-incomes/system-totals", async (req, res) => {
     for (const r of agendaDeposits.rows) {
       addValue("señas", r.payment_method_id, r.total);
     }
+    for (const r of trasladosLocal) addValue("traslados", r.payment_method_id, r.total);
     // Agregar ventas petshop
     for (const r of petshopSales.rows) {
       addValue("ventas_petshop", r.payment_method_id, r.total);

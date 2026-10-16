@@ -27,6 +27,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.10",
     "eslint": "^9.9.0",
     "nodemon": "^3.1.4"
   }
