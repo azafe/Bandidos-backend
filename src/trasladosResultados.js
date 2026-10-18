@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { TrasladoError, sendTrasladoError, transaction, lockSolicitud } from "./traslados.js";
+import { assertRendicionSourceEditable } from "./trasladosRendiciones.js";
+import { porcentajeCentavos } from "./trasladosDinero.js";
 
 const uuid = z.string().uuid();
 const fecha = z.string().date();
@@ -131,7 +133,7 @@ export async function resultadosEnPeriodo(db, tenant, q) {
       add("ingreso", received, weights);
       total.cobros += 1;
       for (const w of weights) groupFor(w.vehiculo_id).cobros += w.puntos / 10000;
-      if (s.modelo_pago === "porcentaje") add("pago", Math.round(received * Number(s.valor_pago) / 100), weights);
+      if (s.modelo_pago === "porcentaje") add("pago", porcentajeCentavos(received, s.valor_pago), weights);
       else if (!s.modelo_pago) pending("pago_sin_definir", weights);
       if (!done) pending("cobros_con_operacion_pendiente", weights);
     }
@@ -367,6 +369,9 @@ export function registerTrasladosResultadosRoutes(app, pool, requireRole) {
         await assertVehicle(db, req.tenantId, input.vehiculo_id);
         if (input.chofer_id) await assertDriver(db, req.tenantId, input.chofer_id);
         const cols = Object.keys(input).filter((k) => k !== "revision");
+        const source = await db.query(`SELECT id FROM ${table} WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, [req.tenantId, id]);
+        if (!source.rows.length) fail(404, "Registro no encontrado.");
+        await assertRendicionSourceEditable(db, req.tenantId, path === "jornadas" ? "jornal" : "gasto", id);
         const result = await db.query(`UPDATE ${table} SET ${cols.map((c, i) => `${c}=$${i + 4}`).join(",")}
           WHERE tenant_id=$1 AND id=$2 AND xmin::text=$3 RETURNING *,xmin::text AS revision`, [req.tenantId, id, input.revision, ...cols.map((c) => input[c])]);
         if (!result.rows.length) {

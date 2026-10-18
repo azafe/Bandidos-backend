@@ -48,6 +48,9 @@ export async function createTrasladosDb({ realAuth = false } = {}) {
   const resultsMigration = await readFile(new URL("../../db/migrations/028_traslados_resultados.sql", import.meta.url), "utf8");
   await db.exec(resultsMigration);
   await db.exec(resultsMigration);
+  const statementsMigration = await readFile(new URL("../../db/migrations/029_traslados_rendiciones.sql", import.meta.url), "utf8");
+  await db.exec(statementsMigration);
+  await db.exec(statementsMigration);
   let tail = Promise.resolve();
   const acquire = async () => {
     const previous = tail;
