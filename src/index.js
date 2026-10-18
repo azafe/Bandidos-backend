@@ -21,6 +21,7 @@ import { solicitudSchema, applySolicitudSummary, syncAgendaTraslado, registerTra
 import { registerTrasladosOperacionRoutes, restrictDriverAccess, validateDriver } from "./trasladosOperacion.js";
 import { tenantPushAudience } from "./pushAudience.js";
 import { registerTrasladosHistoricosRoutes } from "./trasladosHistoricos.js";
+import { registerTrasladosResultadosRoutes } from "./trasladosResultados.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -1334,6 +1335,7 @@ app.use(restrictDriverAccess);
 // Las rutas fijas deben registrarse antes de /v2/traslados/:id.
 registerTrasladosHistoricosRoutes(app, pool, requireRole);
 registerTrasladosOperacionRoutes(app, pool, requireRole);
+registerTrasladosResultadosRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
 
 app.post("/push/subscribe", async (req, res) => {

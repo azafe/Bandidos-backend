@@ -17,6 +17,10 @@ export async function createTrasladosDb({ realAuth = false } = {}) {
     CREATE TABLE comunicaciones_enviadas(tenant_id uuid,pet_id uuid,type text);
     CREATE TABLE agenda_turnos(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),date date NOT NULL,time time NOT NULL,duration integer DEFAULT 60,pet_id uuid,pet_name text,breed text,owner_name text,service_type_id uuid,payment_method_id uuid,deposit_payment_method_id uuid,price numeric,deposit_amount numeric NOT NULL DEFAULT 0,notes text,groomer_id uuid,status text DEFAULT 'reserved',traslado boolean NOT NULL DEFAULT false,traslado_direccion text,traslado_amount numeric NOT NULL DEFAULT 0,created_at timestamptz DEFAULT now());
     CREATE TABLE services(tenant_id uuid,date date,payment_method_id uuid,price numeric);
+    CREATE TABLE expense_categories(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),name text,created_at timestamptz DEFAULT now());
+    CREATE TABLE daily_expenses(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),date date,category_id uuid REFERENCES expense_categories(id),description text,amount numeric,payment_method_id uuid,supplier_id uuid,created_at timestamptz DEFAULT now());
+    CREATE TABLE fixed_expense_charges(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),period date,name text,category_id uuid REFERENCES expense_categories(id),amount numeric,paid_at date);
+    CREATE TABLE fixed_expense_periods(tenant_id uuid NOT NULL REFERENCES tenants(id),period date,source text,UNIQUE(tenant_id,period));
     CREATE TABLE petshop_sales(tenant_id uuid,date date,payment_method_id uuid,total numeric);
     CREATE TABLE push_subscriptions(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,device_id text,endpoint text,p256dh text,auth text,UNIQUE(tenant_id,device_id));
   `);
@@ -41,6 +45,9 @@ export async function createTrasladosDb({ realAuth = false } = {}) {
   const historicalMigration = await readFile(new URL("../../db/migrations/027_traslados_historicos.sql", import.meta.url), "utf8");
   await db.exec(historicalMigration);
   await db.exec(historicalMigration);
+  const resultsMigration = await readFile(new URL("../../db/migrations/028_traslados_resultados.sql", import.meta.url), "utf8");
+  await db.exec(resultsMigration);
+  await db.exec(resultsMigration);
   let tail = Promise.resolve();
   const acquire = async () => {
     const previous = tail;
