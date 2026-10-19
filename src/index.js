@@ -22,6 +22,7 @@ import { registerTrasladosOperacionRoutes, restrictDriverAccess, validateDriver 
 import { tenantPushAudience } from "./pushAudience.js";
 import { registerTrasladosHistoricosRoutes } from "./trasladosHistoricos.js";
 import { registerTrasladosResultadosRoutes } from "./trasladosResultados.js";
+import { registerTrasladosRendicionesRoutes } from "./trasladosRendiciones.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -1336,6 +1337,7 @@ app.use(restrictDriverAccess);
 registerTrasladosHistoricosRoutes(app, pool, requireRole);
 registerTrasladosOperacionRoutes(app, pool, requireRole);
 registerTrasladosResultadosRoutes(app, pool, requireRole);
+registerTrasladosRendicionesRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
 
 app.post("/push/subscribe", async (req, res) => {
