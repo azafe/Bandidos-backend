@@ -57,3 +57,17 @@ CREATE TABLE IF NOT EXISTS team_assignments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_team_assignments_employee ON team_assignments(tenant_id, employee_id);
+
+-- Solo el backend lee y escribe (se conecta como el dueño de las tablas, que
+-- no pasa por RLS). En Supabase, sin esto la API pública podría leerlas.
+ALTER TABLE team_positions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_assignments ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON team_positions, team_assignments FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON team_positions, team_assignments FROM authenticated;
+  END IF;
+END $$;
