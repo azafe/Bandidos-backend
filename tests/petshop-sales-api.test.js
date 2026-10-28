@@ -41,6 +41,7 @@ function createFakeDb() {
       [SHAMPOO_ID, { id: SHAMPOO_ID, stock: 10, tenant_id: TENANT_ID }],
       [COLLAR_ID, { id: COLLAR_ID, stock: 5, tenant_id: TENANT_ID }]
     ]),
+    movements: [],
     sales: new Map([
       [
         SALE_ID,
@@ -68,13 +69,15 @@ function createFakeDb() {
   const clone = () => ({
     products: new Map([...state.products].map(([k, v]) => [k, { ...v }])),
     sales: new Map([...state.sales].map(([k, v]) => [k, { ...v }])),
-    items: state.items.map((i) => ({ ...i }))
+    items: state.items.map((i) => ({ ...i })),
+    movements: state.movements.map((m) => ({ ...m }))
   });
 
   const restore = (snap) => {
     state.products = snap.products;
     state.sales = snap.sales;
     state.items = snap.items;
+    state.movements = snap.movements;
   };
 
   const query = async (sql, params = []) => {
@@ -177,6 +180,16 @@ function createFakeDb() {
       state.sales.delete(id);
       state.items = state.items.filter((i) => i.sale_id !== id);
       return { rowCount: 1, rows: [] };
+    }
+
+    // recordStockMovement: el historial de stock de cada cambio.
+    if (q.startsWith("insert into petshop_stock_movements")) {
+      const [, , , kind, delta, , , saleId, note, , productId, tenantId] = params;
+      const product = state.products.get(productId);
+      if (!product || product.tenant_id !== tenantId) return { rowCount: 0, rows: [] };
+      const row = { kind, delta: Number(delta), stock_after: product.stock, sale_id: saleId, note, product_id: productId };
+      state.movements.push(row);
+      return { rowCount: 1, rows: [{ ...row }] };
     }
 
     throw new Error(`SQL inesperado en el test de ventas: ${sql}`);
@@ -308,6 +321,14 @@ test("PUT y DELETE /v2/petshop/sales/:id", async (t) => {
     assert.equal(db.state.products.get(SHAMPOO_ID).stock, 12);
     assert.equal(db.state.products.get(COLLAR_ID).stock, 6);
     assert.equal(db.state.sales.has(SALE_ID), false);
+    // Cada producto devuelto deja su movimiento con el saldo resultante.
+    assert.deepEqual(
+      db.state.movements.map(({ kind, delta, stock_after, note }) => ({ kind, delta, stock_after, note })),
+      [
+        { kind: "devolucion", delta: 2, stock_after: 12, note: "Venta borrada" },
+        { kind: "devolucion", delta: 1, stock_after: 6, note: "Venta borrada" }
+      ]
+    );
   });
 
   await t.test("borrar una venta de otro tenant da 404 y no mueve nada", async () => {

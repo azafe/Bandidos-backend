@@ -23,6 +23,7 @@ import { tenantPushAudience } from "./pushAudience.js";
 import { registerTrasladosHistoricosRoutes } from "./trasladosHistoricos.js";
 import { registerTrasladosResultadosRoutes } from "./trasladosResultados.js";
 import { registerTrasladosRendicionesRoutes } from "./trasladosRendiciones.js";
+import { recordStockMovement, registerPetshopStockRoutes } from "./petshopStock.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -1339,6 +1340,7 @@ registerTrasladosOperacionRoutes(app, pool, requireRole);
 registerTrasladosResultadosRoutes(app, pool, requireRole);
 registerTrasladosRendicionesRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
+registerPetshopStockRoutes(app, pool);
 
 app.post("/push/subscribe", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
@@ -3304,14 +3306,35 @@ app.post("/v2/petshop/products", async (req, res) => {
   const parsed = createPetshopProductSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { name, sku, category, supplier_id, cost, price, stock, stock_min } = parsed.data;
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+    const result = await client.query(
       `INSERT INTO petshop_products (name, sku, category, supplier_id, cost, price, stock, stock_min, tenant_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [name, sku ?? null, category ?? null, supplier_id ?? null, cost ?? 0, price, stock ?? 0, stock_min ?? 0, req.tenantId]
     );
+    // El stock con el que se da de alta queda en el historial. No cuenta como
+    // conteo: el producto sigue "sin contar" hasta que alguien lo cuente.
+    if ((stock ?? 0) > 0) {
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId: result.rows[0].id,
+        kind: "inicial",
+        delta: stock,
+        userId: req.user?.sub ?? null,
+        note: "Stock al crear el producto",
+      });
+    }
+    await client.query("COMMIT");
     res.status(201).json(result.rows[0]);
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
 });
 
 app.put("/v2/petshop/products/:id", async (req, res) => {
@@ -3325,24 +3348,75 @@ app.put("/v2/petshop/products/:id", async (req, res) => {
   values.push(req.params.id);
   const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   const updateFields = [...fields, "updated_at = now()"];
+  // Cambiar el stock a mano deja un ajuste en el historial con la diferencia.
+  if (parsed.data.stock === undefined) {
+    try {
+      const result = await pool.query(
+        `UPDATE petshop_products SET ${updateFields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
+      );
+      if (result.rowCount === 0) return sendError(res, 404, "Product not found");
+      return res.json(result.rows[0]);
+    } catch (err) { console.error(err); return sendError(res, 500, "Unexpected error"); }
+  }
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+    const locked = await lockProducts(client, req.tenantId, [req.params.id]);
+    const previous = locked.get(String(req.params.id));
+    if (!previous) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Product not found");
+    }
+    const result = await client.query(
       `UPDATE petshop_products SET ${updateFields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-    if (result.rowCount === 0) return sendError(res, 404, "Product not found");
+    const delta = Number(parsed.data.stock) - Number(previous.stock);
+    if (delta !== 0) {
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId: req.params.id,
+        kind: "ajuste",
+        delta,
+        userId: req.user?.sub ?? null,
+        note: "Stock editado desde el producto",
+      });
+    }
+    await client.query("COMMIT");
     res.json(result.rows[0]);
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
 });
 
 app.delete("/v2/petshop/products/:id", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
+  const client = await pool.connect();
   try {
-    const result = await pool.query(`DELETE FROM petshop_products WHERE id = $1${tenantClause}`, params);
-    if (result.rowCount === 0) return sendError(res, 404, "Product not found");
+    await client.query("BEGIN");
+    // El historial de stock no impide borrar un producto sin ventas: se va
+    // con él. Con ventas, la FK de petshop_sale_items lo sigue impidiendo.
+    await client.query(`DELETE FROM petshop_stock_movements WHERE product_id = $1${tenantClause}`, params);
+    const result = await client.query(`DELETE FROM petshop_products WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Product not found");
+    }
+    await client.query("COMMIT");
     res.json({ ok: true });
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if (err?.code === "23503") return sendError(res, 409, "El producto tiene ventas registradas");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
 });
 
 app.get("/v2/petshop/sales", async (req, res) => {
@@ -3434,6 +3508,14 @@ app.post("/v2/petshop/sales", async (req, res) => {
          WHERE id = $2 AND tenant_id = $3`,
         [item.quantity, item.product_id, req.tenantId]
       );
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId: item.product_id,
+        kind: "venta",
+        delta: -Number(item.quantity),
+        userId: req.user?.sub ?? null,
+        saleId: sale.id,
+      });
     }
 
     await client.query("COMMIT");
@@ -3544,6 +3626,15 @@ app.put("/v2/petshop/sales/:id", async (req, res) => {
            WHERE id = $2 AND tenant_id = $3`,
           [delta, productId, req.tenantId]
         );
+        await recordStockMovement(client, {
+          tenantId: req.tenantId,
+          productId,
+          kind: delta > 0 ? "devolucion" : "venta",
+          delta,
+          userId: req.user?.sub ?? null,
+          saleId: req.params.id,
+          note: "Venta editada",
+        });
       }
 
       await client.query(`DELETE FROM petshop_sale_items WHERE sale_id = $1`, [req.params.id]);
@@ -3640,6 +3731,15 @@ app.delete("/v2/petshop/sales/:id", async (req, res) => {
          WHERE id = $2 AND tenant_id = $3`,
         [quantity, productId, req.tenantId]
       );
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId,
+        kind: "devolucion",
+        delta: quantity,
+        userId: req.user?.sub ?? null,
+        saleId: req.params.id,
+        note: "Venta borrada",
+      });
     }
 
     // petshop_sale_items cae por CASCADE.
@@ -3722,17 +3822,19 @@ app.post("/v2/petshop/stock-movements", async (req, res) => {
       [newStock, product_id, req.tenantId]
     );
 
-    const movementResult = await client.query(
-      `INSERT INTO petshop_stock_movements
-       (date, product_id, type, quantity, note, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [date, product_id, type, quantity, note ?? null, req.tenantId]
-    );
+    const movement = await recordStockMovement(client, {
+      tenantId: req.tenantId,
+      productId: product_id,
+      kind: type === "in" ? "ingreso" : type === "out" ? "merma" : "ajuste",
+      delta: newStock - Number(product.stock),
+      userId: req.user?.sub ?? null,
+      note: note ?? null,
+      date,
+    });
 
     await client.query("COMMIT");
     res.status(201).json({
-      movement: movementResult.rows[0],
+      movement,
       product: updateResult.rows[0]
     });
   } catch (err) {
