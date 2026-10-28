@@ -16,7 +16,7 @@ test('shared grooming: persistence, validation, tenant isolation, reports and si
   t.after(async () => { await db.close(); });
   try {
   await db.db.exec(`ALTER TABLE services ADD COLUMN id uuid DEFAULT gen_random_uuid(), ADD COLUMN pet_id uuid, ADD COLUMN customer_id uuid, ADD COLUMN service_type_id uuid, ADD COLUMN groomer_id uuid, ADD COLUMN notes text, ADD COLUMN created_at timestamptz DEFAULT now();`);
-  await db.db.exec(await readFile(new URL('../db/migrations/030_shared_groomer.sql', import.meta.url), 'utf8'));
+  await db.db.exec(await readFile(new URL('../db/migrations/033_shared_groomer.sql', import.meta.url), 'utf8'));
   const [tenant, other, primary, second, outsider, driver, turno, pet, customer, type, payment] = Array.from({length:11}, () => randomUUID());
   await db.query('INSERT INTO tenants(id) VALUES($1),($2)', [tenant,other]);
   for (const [id, tenantId, isDriver] of [[primary,tenant,false],[second,tenant,false],[outsider,other,false],[driver,tenant,true]]) {
