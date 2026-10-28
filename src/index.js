@@ -276,6 +276,23 @@ const createAgendaWithNewPetSchema = z.object({
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
 });
 
+async function validateSharedGroomer(db, tenantId, record, res) {
+  if (!record.second_groomer_id) return true;
+  if (!record.groomer_id || record.groomer_id === record.second_groomer_id) {
+    sendError(res, 400, "Seleccioná dos peluqueros distintos para compartir el servicio.");
+    return false;
+  }
+  const result = await db.query(
+    "SELECT id FROM employees WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND COALESCE(is_driver, false) = false",
+    [tenantId, [record.groomer_id, record.second_groomer_id]]
+  );
+  if (result.rowCount !== 2) {
+    sendError(res, 400, "Los dos peluqueros deben pertenecer a esta sucursal y no ser choferes.");
+    return false;
+  }
+  return true;
+}
+
 const updateAgendaSchema = z.object({
   date: dateSchema.optional(),
   time: timeSchema.optional(),
@@ -291,6 +308,7 @@ const updateAgendaSchema = z.object({
   deposit_amount: z.coerce.number().min(0).optional(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
+  second_groomer_id: z.string().uuid().optional().nullable(),
   status: agendaStatusSchema.optional(),
   traslado: z.boolean().optional(),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
@@ -431,6 +449,7 @@ const createServiceRecordSchema = z.object({
   price: z.coerce.number().min(0),
   payment_method_id: z.string().uuid(),
   groomer_id: z.string().uuid().optional().nullable(),
+  second_groomer_id: z.string().uuid().optional().nullable(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
@@ -1622,10 +1641,10 @@ app.get("/reports/by-groomer", async (req, res) => {
       `SELECT
          e.id AS groomer_id,
          e.name AS groomer_name,
-         COUNT(s.id) AS services_count,
-         COALESCE(SUM(s.price), 0) AS total
+         SUM(CASE WHEN s.second_groomer_id IS NULL THEN 1 ELSE 0.5 END) AS services_count,
+         COALESCE(SUM(s.price / CASE WHEN s.second_groomer_id IS NULL THEN 1 ELSE 2 END), 0) AS total
        FROM services s
-       LEFT JOIN employees e ON s.groomer_id = e.id
+       LEFT JOIN employees e ON e.id IN (s.groomer_id, s.second_groomer_id)
        ${whereClause}
        GROUP BY e.id, e.name
        ORDER BY total DESC`,
@@ -1723,7 +1742,7 @@ app.get("/services", async (req, res) => {
 
   if (groomerId) {
     params.push(groomerId);
-    filters.push(`groomer_id = $${params.length}`);
+    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -1753,14 +1772,16 @@ app.post("/services", async (req, res) => {
     price,
     payment_method_id,
     groomer_id,
+    second_groomer_id,
     notes
   } = parsed.data;
 
   try {
+    if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
     const result = await pool.query(
       `INSERT INTO services
-        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         date,
@@ -1771,7 +1792,8 @@ app.post("/services", async (req, res) => {
         payment_method_id,
         groomer_id ?? null,
         notes ?? null,
-        req.tenantId
+        req.tenantId,
+        second_groomer_id ?? null
       ]
     );
 
@@ -2799,6 +2821,7 @@ app.put("/agenda/:id", async (req, res) => {
       "deposit_amount",
       "notes",
       "groomer_id",
+      "second_groomer_id",
       "status",
       "traslado",
       "traslado_direccion",
@@ -2816,7 +2839,7 @@ app.put("/agenda/:id", async (req, res) => {
   let previousTurno;
   try {
     const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado", "traslado_solicitud"];
-    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || trasladoFields.some((field) => Object.hasOwn(updates, field));
+    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || Object.hasOwn(updates, "groomer_id") || Object.hasOwn(updates, "second_groomer_id") || trasladoFields.some((field) => Object.hasOwn(updates, field));
     if (checksTraslado) {
       client = await pool.connect();
       await client.query("BEGIN");
@@ -2831,6 +2854,10 @@ app.put("/agenda/:id", async (req, res) => {
       const previous = current.rows[0];
       previousTurno = previous;
       const next = { ...previous, ...updates };
+      if (!(await validateSharedGroomer(client, req.tenantId, next, res))) {
+        await client.query("ROLLBACK");
+        return;
+      }
       const changedTraslado = trasladoFields.some((field) => {
         if (!Object.hasOwn(updates, field)) return false;
         return field === "traslado_amount"
@@ -3914,7 +3941,7 @@ app.get("/v2/services", async (req, res) => {
 
   if (groomerId) {
     params.push(groomerId);
-    filters.push(`groomer_id = $${params.length}`);
+    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -3944,12 +3971,13 @@ app.post("/v2/services", async (req, res) => {
   const parsed = createServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes } = parsed.data;
+  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, second_groomer_id, notes } = parsed.data;
   try {
+    if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
     const result = await pool.query(
-      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId]
+      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId, second_groomer_id ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
