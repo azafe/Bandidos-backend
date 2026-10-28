@@ -41,6 +41,7 @@ test("equipo: organigrama y personal", async (t) => {
   const migration = await readFile(new URL("../db/migrations/031_equipo_organigrama.sql", import.meta.url), "utf8");
   await db.exec(migration);
   await db.exec(migration); // repetible
+  await db.exec(await readFile(new URL("../db/migrations/033_roles_permisos.sql", import.meta.url), "utf8"));
 
   const A = uid(), B = uid();
   await db.query("INSERT INTO tenants(id) VALUES($1),($2)", [A, B]);

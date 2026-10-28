@@ -55,6 +55,11 @@ const norm = (sql) => sql.replace(/\s+/g, " ").trim().toLowerCase();
 // auth, o null si no la reconoce (el caller sigue con su propio switch).
 export function handleAuthRevalidation(sql, params) {
   const q = norm(sql);
+  // Permisos por módulo (src/permissions.js): sin configuración guardada, cada
+  // rol usa sus permisos por defecto.
+  if (q.startsWith("select modules from tenant_role_permissions") || q.startsWith("select role, modules from tenant_role_permissions")) {
+    return { rowCount: 0, rows: [] };
+  }
   if (!q.startsWith("select u.role, u.tenant_id")) return null;
   const user = usersById.get(params[0]);
   if (!user) return { rowCount: 0, rows: [] };

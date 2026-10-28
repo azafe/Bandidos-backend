@@ -45,6 +45,7 @@ async function createDb() {
     async migrate() {
       const sql = await readFile(new URL("../db/migrations/030_petshop_stock_conteo.sql", import.meta.url), "utf8");
       await db.exec(sql);
+      await db.exec(await readFile(new URL("../db/migrations/033_roles_permisos.sql", import.meta.url), "utf8"));
     },
     async connect() {
       const previous = tail;

@@ -1,3 +1,4 @@
+import { CONFIGURABLE_ROLES } from "./permissions.js";
 import { z } from "zod";
 
 const id = z.string().uuid();
@@ -794,7 +795,7 @@ export function registerTrasladosRoutes(app, pool, requireRole) {
   );
   app.post(
     "/v2/traslado-solicitudes/:id/cobro",
-    requireRole("admin", "user", "staff"),
+    requireRole("admin", "user", ...CONFIGURABLE_ROLES),
     route(async (req, res) => {
       const value = parse(cobroSchema, req.body);
       const result = await transaction(pool, async (db) => {

@@ -25,6 +25,7 @@ import { registerTrasladosResultadosRoutes } from "./trasladosResultados.js";
 import { registerTrasladosRendicionesRoutes } from "./trasladosRendiciones.js";
 import { recordStockMovement, registerPetshopStockRoutes } from "./petshopStock.js";
 import { registerTeamRoutes } from "./team.js";
+import { ASSIGNABLE_ROLES, CONFIGURABLE_ROLES, enforceModules, registerPermissionsRoutes } from "./permissions.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -122,7 +123,8 @@ const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 // super_admin queda deliberadamente afuera: nadie puede auto-asignarse ni
 // asignarle a otro ese rol vía estas rutas tenant-scoped. La única forma de
 // crear un super_admin es una operación manual sobre la base.
-const assignableUserRoles = z.enum(["admin", "staff", "user"]);
+// super_admin no se asigna desde un local.
+const assignableUserRoles = z.enum(ASSIGNABLE_ROLES);
 
 // min(8) para que una contraseña nueva nunca quede más débil que lo que el
 // propio flujo de reseteo exige (resetPasswordSchema, también min 8).
@@ -676,6 +678,10 @@ const requireRole = (...roles) => {
     return next();
   };
 };
+
+// Para las rutas que antes eran solo del admin y ahora se pueden dar como
+// módulo: el rol lo decide enforceModules (src/permissions.js), que ya corrió.
+const delegatedToModules = requireRole("admin", "user", ...CONFIGURABLE_ROLES);
 
 const requireSuperAdmin = (req, res, next) => {
   if (!req.user || req.user.role !== "super_admin") {
@@ -1344,6 +1350,10 @@ app.use((req, res, next) => {
 });
 
 app.use(restrictDriverAccess);
+// Permisos por módulo (src/permissions.js): qué rol entra a qué. Va antes de
+// registrar las rutas para que las cubra a todas.
+app.use(enforceModules(pool));
+registerPermissionsRoutes(app, pool, requireRole);
 // Las rutas fijas deben registrarse antes de /v2/traslados/:id.
 registerTrasladosHistoricosRoutes(app, pool, requireRole);
 registerTrasladosOperacionRoutes(app, pool, requireRole);
@@ -1351,7 +1361,7 @@ registerTrasladosResultadosRoutes(app, pool, requireRole);
 registerTrasladosRendicionesRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
 registerPetshopStockRoutes(app, pool);
-registerTeamRoutes(app, pool, requireRole);
+registerTeamRoutes(app, pool, () => delegatedToModules);
 
 app.post("/push/subscribe", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
@@ -1896,7 +1906,7 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
 
   try {
     if (chofer_id) {
-      if (!["staff", "user"].includes(role)) return sendError(res, 400, "Usá una cuenta de equipo para el acceso de chofer.");
+      if (!["user", ...CONFIGURABLE_ROLES].includes(role)) return sendError(res, 400, "Usá una cuenta de equipo para el acceso de chofer.");
       const user = await transaction(pool, async (db) => {
         await validateDriver(db, req.tenantId, chofer_id);
         const saved = await db.query(
@@ -2012,7 +2022,7 @@ app.get("/v2/employees/:id", async (req, res) => {
   }
 });
 
-app.post("/v2/employees", requireRole("admin"), async (req, res) => {
+app.post("/v2/employees", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2033,7 +2043,7 @@ app.post("/v2/employees", requireRole("admin"), async (req, res) => {
   }
 });
 
-app.put("/v2/employees/:id", requireRole("admin"), async (req, res) => {
+app.put("/v2/employees/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -2073,7 +2083,7 @@ app.put("/v2/employees/:id", requireRole("admin"), async (req, res) => {
   }
 });
 
-app.delete("/v2/employees/:id", requireRole("admin"), async (req, res) => {
+app.delete("/v2/employees/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -3136,7 +3146,7 @@ const loadBookingConfig = async (tenantId) => {
   };
 };
 
-app.get("/v2/booking/settings", requireRole("admin"), async (req, res) => {
+app.get("/v2/booking/settings", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   try {
     res.json(await loadBookingConfig(req.tenantId));
@@ -3156,7 +3166,7 @@ app.get("/v2/booking/link", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/booking/settings", requireRole("admin"), async (req, res) => {
+app.put("/v2/booking/settings", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = bookingSettingsSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -3191,7 +3201,7 @@ app.put("/v2/booking/settings", requireRole("admin"), async (req, res) => {
 });
 
 // Reemplaza el horario semanal completo (lo que se ve en la pantalla).
-app.put("/v2/booking/hours", requireRole("admin"), async (req, res) => {
+app.put("/v2/booking/hours", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = bookingHoursSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3220,7 +3230,7 @@ app.put("/v2/booking/hours", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/booking/closed-days", requireRole("admin"), async (req, res) => {
+app.post("/v2/booking/closed-days", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = closedDaySchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3235,7 +3245,7 @@ app.post("/v2/booking/closed-days", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/booking/closed-days/:id", requireRole("admin"), async (req, res) => {
+app.delete("/v2/booking/closed-days/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   if (!z.string().uuid().safeParse(req.params.id).success) return sendError(res, 404, "Closed day not found");
   try {
@@ -3271,7 +3281,7 @@ app.get("/v2/payment-methods/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/payment-methods", requireRole("admin"), async (req, res) => {
+app.post("/v2/payment-methods", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createPaymentMethodSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3285,7 +3295,7 @@ app.post("/v2/payment-methods", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/payment-methods/:id", requireRole("admin"), async (req, res) => {
+app.put("/v2/payment-methods/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updatePaymentMethodSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3302,7 +3312,7 @@ app.put("/v2/payment-methods/:id", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/payment-methods/:id", requireRole("admin"), async (req, res) => {
+app.delete("/v2/payment-methods/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -3955,7 +3965,7 @@ app.post("/v2/services", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/services/:id", requireRole("admin"), async (req, res) => {
+app.put("/v2/services/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -3977,7 +3987,7 @@ app.put("/v2/services/:id", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/services/:id", requireRole("admin"), async (req, res) => {
+app.delete("/v2/services/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -4049,7 +4059,7 @@ app.get("/v2/suppliers/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/suppliers", requireRole("admin"), async (req, res) => {
+app.post("/v2/suppliers", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createSupplierSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -4064,7 +4074,7 @@ app.post("/v2/suppliers", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/suppliers/:id", requireRole("admin"), async (req, res) => {
+app.put("/v2/suppliers/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateSupplierSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -4081,7 +4091,7 @@ app.put("/v2/suppliers/:id", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/suppliers/:id", requireRole("admin"), async (req, res) => {
+app.delete("/v2/suppliers/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
@@ -4108,7 +4118,7 @@ app.get("/v2/suppliers/:id/movements", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/suppliers/:id/movements", requireRole("admin"), async (req, res) => {
+app.post("/v2/suppliers/:id/movements", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createSupplierMovementSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -4181,7 +4191,7 @@ app.get("/v2/expense-categories/:id", async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.post("/v2/expense-categories", requireRole("admin"), async (req, res) => {
+app.post("/v2/expense-categories", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = createExpenseCategorySchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -4195,7 +4205,7 @@ app.post("/v2/expense-categories", requireRole("admin"), async (req, res) => {
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.put("/v2/expense-categories/:id", requireRole("admin"), async (req, res) => {
+app.put("/v2/expense-categories/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const parsed = updateExpenseCategorySchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
@@ -4212,7 +4222,7 @@ app.put("/v2/expense-categories/:id", requireRole("admin"), async (req, res) => 
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
 });
 
-app.delete("/v2/expense-categories/:id", requireRole("admin"), async (req, res) => {
+app.delete("/v2/expense-categories/:id", delegatedToModules, async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;

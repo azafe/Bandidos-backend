@@ -18,7 +18,8 @@ const parse = (schema, value) => {
 export function restrictDriverAccess(req, res, next) {
   if (!req.driverId) return next();
   const path = req.path.replace(/\/+$/, "");
-  if (req.method === "GET" && path === "/me") return next();
+  // Sus propios datos y permisos (que dicen que es chofer) los puede leer.
+  if (req.method === "GET" && (path === "/me" || path === "/me/permissions")) return next();
   if (!req.driverActive) {
     return res.status(403).json({ message: "Tu acceso de chofer está inactivo. Contactá al administrador." });
   }
