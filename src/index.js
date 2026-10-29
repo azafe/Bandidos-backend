@@ -277,17 +277,18 @@ const createAgendaWithNewPetSchema = z.object({
 });
 
 async function validateSharedGroomer(db, tenantId, record, res) {
-  if (!record.second_groomer_id) return true;
-  if (!record.groomer_id || record.groomer_id === record.second_groomer_id) {
-    sendError(res, 400, "Seleccioná dos peluqueros distintos para compartir el servicio.");
+  if (!record.second_groomer_id && !record.third_groomer_id) return true;
+  const participants = [record.groomer_id, record.second_groomer_id, record.third_groomer_id].filter(Boolean);
+  if (!record.groomer_id || !record.second_groomer_id || new Set(participants).size !== participants.length) {
+    sendError(res, 400, "Seleccioná entre dos y tres peluqueros distintos para compartir el servicio.");
     return false;
   }
   const result = await db.query(
     "SELECT id FROM employees WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND COALESCE(is_driver, false) = false",
-    [tenantId, [record.groomer_id, record.second_groomer_id]]
+    [tenantId, participants]
   );
-  if (result.rowCount !== 2) {
-    sendError(res, 400, "Los dos peluqueros deben pertenecer a esta sucursal y no ser choferes.");
+  if (result.rowCount !== participants.length) {
+    sendError(res, 400, "Todos los peluqueros deben pertenecer a esta sucursal y no ser choferes.");
     return false;
   }
   return true;
@@ -309,6 +310,7 @@ const updateAgendaSchema = z.object({
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
   second_groomer_id: z.string().uuid().optional().nullable(),
+  third_groomer_id: z.string().uuid().optional().nullable(),
   status: agendaStatusSchema.optional(),
   traslado: z.boolean().optional(),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
@@ -450,6 +452,7 @@ const createServiceRecordSchema = z.object({
   payment_method_id: z.string().uuid(),
   groomer_id: z.string().uuid().optional().nullable(),
   second_groomer_id: z.string().uuid().optional().nullable(),
+  third_groomer_id: z.string().uuid().optional().nullable(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
@@ -1641,10 +1644,10 @@ app.get("/reports/by-groomer", async (req, res) => {
       `SELECT
          e.id AS groomer_id,
          e.name AS groomer_name,
-         SUM(CASE WHEN s.second_groomer_id IS NULL THEN 1 ELSE 0.5 END) AS services_count,
-         COALESCE(SUM(s.price / CASE WHEN s.second_groomer_id IS NULL THEN 1 ELSE 2 END), 0) AS total
+         SUM((1.0 / (1 + (s.second_groomer_id IS NOT NULL)::int + (s.third_groomer_id IS NOT NULL)::int))) AS services_count,
+         COALESCE(SUM(s.price / (1 + (s.second_groomer_id IS NOT NULL)::int + (s.third_groomer_id IS NOT NULL)::int)), 0) AS total
        FROM services s
-       LEFT JOIN employees e ON e.id IN (s.groomer_id, s.second_groomer_id)
+       LEFT JOIN employees e ON e.id IN (s.groomer_id, s.second_groomer_id, s.third_groomer_id)
        ${whereClause}
        GROUP BY e.id, e.name
        ORDER BY total DESC`,
@@ -1742,7 +1745,7 @@ app.get("/services", async (req, res) => {
 
   if (groomerId) {
     params.push(groomerId);
-    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length})`);
+    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length} OR third_groomer_id = $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -1773,6 +1776,7 @@ app.post("/services", async (req, res) => {
     payment_method_id,
     groomer_id,
     second_groomer_id,
+    third_groomer_id,
     notes
   } = parsed.data;
 
@@ -1780,8 +1784,8 @@ app.post("/services", async (req, res) => {
     if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
     const result = await pool.query(
       `INSERT INTO services
-        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id, third_groomer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
       [
         date,
@@ -1793,7 +1797,8 @@ app.post("/services", async (req, res) => {
         groomer_id ?? null,
         notes ?? null,
         req.tenantId,
-        second_groomer_id ?? null
+        second_groomer_id ?? null,
+        third_groomer_id ?? null
       ]
     );
 
@@ -2822,6 +2827,7 @@ app.put("/agenda/:id", async (req, res) => {
       "notes",
       "groomer_id",
       "second_groomer_id",
+      "third_groomer_id",
       "status",
       "traslado",
       "traslado_direccion",
@@ -2839,7 +2845,7 @@ app.put("/agenda/:id", async (req, res) => {
   let previousTurno;
   try {
     const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado", "traslado_solicitud"];
-    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || Object.hasOwn(updates, "groomer_id") || Object.hasOwn(updates, "second_groomer_id") || trasladoFields.some((field) => Object.hasOwn(updates, field));
+    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || Object.hasOwn(updates, "groomer_id") || Object.hasOwn(updates, "second_groomer_id") || Object.hasOwn(updates, "third_groomer_id") || trasladoFields.some((field) => Object.hasOwn(updates, field));
     if (checksTraslado) {
       client = await pool.connect();
       await client.query("BEGIN");
@@ -3941,7 +3947,7 @@ app.get("/v2/services", async (req, res) => {
 
   if (groomerId) {
     params.push(groomerId);
-    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length})`);
+    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length} OR third_groomer_id = $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -3971,13 +3977,13 @@ app.post("/v2/services", async (req, res) => {
   const parsed = createServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, second_groomer_id, notes } = parsed.data;
+  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, second_groomer_id, third_groomer_id, notes } = parsed.data;
   try {
     if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
     const result = await pool.query(
-      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId, second_groomer_id ?? null]
+      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id, third_groomer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId, second_groomer_id ?? null, third_groomer_id ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }

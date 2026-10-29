@@ -17,6 +17,8 @@ test('shared grooming: persistence, validation, tenant isolation, reports and si
   try {
   await db.db.exec(`ALTER TABLE services ADD COLUMN id uuid DEFAULT gen_random_uuid(), ADD COLUMN pet_id uuid, ADD COLUMN customer_id uuid, ADD COLUMN service_type_id uuid, ADD COLUMN groomer_id uuid, ADD COLUMN notes text, ADD COLUMN created_at timestamptz DEFAULT now();`);
   await db.db.exec(await readFile(new URL('../db/migrations/033_shared_groomer.sql', import.meta.url), 'utf8'));
+  await db.db.exec(await readFile(new URL('../db/migrations/034_third_groomer.sql', import.meta.url), 'utf8'));
+  await db.db.exec(await readFile(new URL('../db/migrations/034_third_groomer.sql', import.meta.url), 'utf8'));
   const [tenant, other, primary, second, outsider, driver, turno, pet, customer, type, payment] = Array.from({length:11}, () => randomUUID());
   await db.query('INSERT INTO tenants(id) VALUES($1),($2)', [tenant,other]);
   for (const [id, tenantId, isDriver] of [[primary,tenant,false],[second,tenant,false],[outsider,other,false],[driver,tenant,true]]) {
@@ -60,6 +62,36 @@ test('shared grooming: persistence, validation, tenant isolation, reports and si
     result=await request('/v2/services','POST',{...service,second_groomer_id:invalid});
     assert.equal(result.status,400,JSON.stringify(result));
   }
+  const third = randomUUID();
+  await db.query('INSERT INTO employees(id,tenant_id,name,is_driver) VALUES($1,$2,$3,false)', [third,tenant,'Third']);
+  for (const invalid of [primary,second,outsider,driver]) {
+    result = await request(`/agenda/${turno}`, 'PUT', {third_groomer_id:invalid});
+    assert.equal(result.status,400,JSON.stringify(result));
+    result = await request('/v2/services','POST',{...service,third_groomer_id:invalid});
+    assert.equal(result.status,400,JSON.stringify(result));
+  }
+  result = await request(`/agenda/${turno}`, 'PUT', {third_groomer_id:third,price:30000});
+  assert.equal(result.status,200,JSON.stringify(result));
+  assert.equal(result.body.third_groomer_id,third);
+  const reloaded = await request('/agenda?from=2026-10-28&to=2026-10-28');
+  assert.equal(reloaded.body.find(row=>row.id===turno).third_groomer_id,third);
+  result = await request(`/agenda/${turno}`, 'PUT', {second_groomer_id:null});
+  assert.equal(result.status,400);
+  for (const path of ['/services','/v2/services']) {
+    result = await request(path,'POST',{...service,price:30000,third_groomer_id:third});
+    assert.equal(result.status,201,JSON.stringify(result));
+    assert.equal(result.body.third_groomer_id,third);
+    result = await request(`${path}?groomer_id=${third}`);
+    assert.equal(result.body.length, path === '/services' ? 1 : 2);
+  }
+  result = await request('/reports/by-groomer');
+  assert.equal(result.status,200,JSON.stringify(result));
+  assert.equal(result.body.length,3);
+  assert.equal(result.body.reduce((sum,row)=>sum+Number(row.total),0),80000);
+  const thirdReport = result.body.find(row=>row.groomer_id===third);
+  assert.equal(Number(thirdReport.total),20000);
+  result = await request(`/agenda/${turno}`, 'PUT', {third_groomer_id:null});
+  assert.equal(result.status,200);
   result=await request(`/agenda/${turno}`,'PUT',{second_groomer_id:null});
   assert.equal(result.status,200); assert.equal(result.body.second_groomer_id,null);
   // Legacy single-groomer completion still works.
