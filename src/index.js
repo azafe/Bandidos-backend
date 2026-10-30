@@ -36,6 +36,7 @@ import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 import { uploadPhoto } from "./storage.js";
 import { registerEmployeePortalRoutes, restrictEmployeeAccess, validateEmployee } from "./employeePortal.js";
 import { registerChatRoutes } from "./chat.js";
+import { migrateEmployeeEcosystem, employeeMigrationNames } from "./employeeMigrations.js";
 import {
   BOOKING_SIZES,
   addDays,
@@ -762,6 +763,19 @@ const buildUpdate = (allowedFields, payload) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+
+// Readiness pública sin datos del negocio: comprueba las migraciones que el
+// arranque debe haber confirmado antes de recibir tráfico.
+app.get("/health/employee-ecosystem", async (_req,res) => {
+  try {
+    const result=await pool.query('SELECT name FROM app_schema_migrations WHERE name=ANY($1::text[])',[employeeMigrationNames]);
+    const ready=result.rows.length===employeeMigrationNames.length;
+    res.set('Cache-Control','no-store').status(ready?200:503).json({ok:ready,release:'employee-ecosystem-v1',commit:process.env.RAILWAY_GIT_COMMIT_SHA || null});
+  } catch {
+    res.status(503).json({ok:false,release:'employee-ecosystem-v1'});
+  }
+});
+
 });
 
 app.get("/push/vapid-public-key", (_req, res) => {
@@ -2722,6 +2736,7 @@ app.post("/agenda", async (req, res) => {
 
   applySolicitudSummary(parsed.data);
   if (!validateFinishedTraslado(res, parsed.data)) return;
+  if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
 
   const {
     date,
@@ -2791,6 +2806,7 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
 
   applySolicitudSummary(parsed.data);
   if (!validateFinishedTraslado(res, parsed.data)) return;
+  if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
 
   const {
     date, time, duration, service_type_id, payment_method_id, deposit_payment_method_id, price,
@@ -5502,6 +5518,7 @@ const port = process.env.PORT || 3000;
 export { app };
 
 if (process.env.NODE_ENV !== "test") {
+  await migrateEmployeeEcosystem(pool);
   app.listen(port, () => {
     console.log(`API running on :${port}`);
   });

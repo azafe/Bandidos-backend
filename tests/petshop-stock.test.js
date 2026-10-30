@@ -21,8 +21,8 @@ async function createDb() {
   const db = new PGlite({ parsers: { 1082: (value) => value } });
   await db.exec(`
     CREATE TABLE tenants(id uuid PRIMARY KEY,status text DEFAULT 'active',suspended_reason text);
-    CREATE TABLE employees(id uuid PRIMARY KEY,tenant_id uuid,status text,is_driver boolean);
-    CREATE TABLE users(id uuid PRIMARY KEY,tenant_id uuid REFERENCES tenants(id),role text,email text,chofer_id uuid);
+    CREATE TABLE employees(id uuid PRIMARY KEY,tenant_id uuid,name text,status text,is_driver boolean);
+    CREATE TABLE users(id uuid PRIMARY KEY,tenant_id uuid REFERENCES tenants(id),role text,email text,chofer_id uuid,employee_id uuid);
     CREATE TABLE petshop_products(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),name text NOT NULL,sku text,category text,supplier_id uuid,
       cost numeric(12,2) NOT NULL DEFAULT 0,price numeric(12,2) NOT NULL,stock int NOT NULL DEFAULT 0,stock_min int NOT NULL DEFAULT 0,
       created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),tenant_id uuid NOT NULL REFERENCES tenants(id));

@@ -36,7 +36,7 @@ test("equipo: organigrama y personal", async (t) => {
     CREATE TABLE employees(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL REFERENCES tenants(id),name text NOT NULL,role text NOT NULL,
       phone text,email text,status text NOT NULL CHECK (status IN ('active','inactive')),notes text,commission_rate numeric DEFAULT 0.40,
       is_driver boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now());
-    CREATE TABLE users(id uuid PRIMARY KEY,tenant_id uuid,role text,email text,chofer_id uuid);
+    CREATE TABLE users(id uuid PRIMARY KEY,tenant_id uuid,role text,email text,chofer_id uuid,employee_id uuid);
   `);
   const migration = await readFile(new URL("../db/migrations/031_equipo_organigrama.sql", import.meta.url), "utf8");
   await db.exec(migration);

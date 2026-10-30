@@ -66,8 +66,8 @@ test('cuentas personales, comisiones históricas, entregas y chat con PostgreSQL
     const next=await req('/agenda','POST',{date:'2026-10-17',time:'11:00',pet_name:'Lola',owner_name:'Dueña',groomer_id:employees[0],price:1000,status:'finished'});
     assert.equal(next.status,201);work=next.body.id;assert.equal(Number(next.body.commission_rate_snapshot),0.9);
     assert.equal((await statement()).body.summary.earned,2233.34);
-    const bad=await req(`/agenda/${work}`,'PUT',{second_groomer_id:employees[3]});assert.equal(bad.status,409);
-    assert.equal((await req(`/agenda/${work}`,'PUT',{second_groomer_id:employees[0]})).status,409);
+    const bad=await req(`/agenda/${work}`,'PUT',{second_groomer_id:employees[3]});assert.equal(bad.status,400);
+    assert.equal((await req(`/agenda/${work}`,'PUT',{second_groomer_id:employees[0]})).status,400);
   });
   let advance;
   await t.test('saldo acumulado, anticipo idempotente, pago y anulación auditable',async()=>{

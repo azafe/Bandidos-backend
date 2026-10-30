@@ -4,7 +4,7 @@ import { handleAuthRevalidation } from "./authRevalidation.js";
 
 // PostgreSQL real embebido: los CHECK, FK compuestos, transacciones y agregados
 // se ejecutan, en lugar de repetir la implementación en un doble de SQL.
-export async function createTrasladosDb({ realAuth = false } = {}) {
+export async function createTrasladosDb({ realAuth = false, employeeSchema = true } = {}) {
   const db = new PGlite({ parsers: { 1082: (value) => value } });
   await db.exec(`
     CREATE TABLE tenants(id uuid PRIMARY KEY,status text DEFAULT 'active',suspended_reason text,name text,logo_url text,primary_color text,secondary_color text,enabled_modules jsonb);
@@ -54,7 +54,7 @@ export async function createTrasladosDb({ realAuth = false } = {}) {
   const teamMigration = await readFile(new URL("../../db/migrations/031_equipo_organigrama.sql", import.meta.url), "utf8");
   await db.exec(teamMigration);
   await db.exec(teamMigration);
-  await db.exec(await readFile(new URL("../../db/migrations/035_cuentas_personales.sql", import.meta.url), "utf8"));
+  if (employeeSchema) await db.exec(await readFile(new URL("../../db/migrations/035_cuentas_personales.sql", import.meta.url), "utf8"));
   let tail = Promise.resolve();
   const acquire = async () => {
     const previous = tail;

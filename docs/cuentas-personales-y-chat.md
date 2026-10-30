@@ -86,18 +86,20 @@ su restricción anterior de suscripción push y cuentan con los avisos dentro de
 ## Activación
 
 1. Respaldar la base siguiendo el procedimiento habitual.
-2. Con `DATABASE_URL` del entorno correspondiente, ejecutar
-   `node scripts/migrar-cuentas-chat.mjs`. Usa la misma conexión propietaria que el
-   backend. Las nuevas tablas tienen RLS habilitado para bloquear clientes
-   directos; las consultas del servidor usan la conexión propietaria.
-3. Publicar el backend y después el frontend. Las migraciones son aditivas y
-   pueden aplicarse antes de publicar el código.
+2. Publicar el backend en Railway. Antes de escuchar tráfico, el arranque aplica
+   automáticamente **035** y **036** con su `DATABASE_URL` existente. Un lock
+   coordina réplicas y el journal `app_schema_migrations` guarda el checksum para
+   ejecutar cada migración una sola vez. Ambas migraciones y el journal se
+   confirman en una transacción; ante un fallo se revierte y no inicia el servidor.
+   También se pueden ejecutar con `node scripts/migrar-cuentas-chat.mjs`.
+   Las tablas usan RLS; la conexión propietaria del backend valida el acceso.
+3. Comprobar `/health/employee-ecosystem` (HTTP 200, `ok: true`) antes de publicar
+   el frontend. La respuesta verifica el journal y no expone datos del negocio.
 4. En Equipo → empleado → Liquidación, definir inicio y saldo anterior.
 5. En Usuarios, crear o vincular una cuenta Staff a ese empleado.
 6. Verificar una sesión personal y una de administración en el mismo período.
 
-Implementado y probado localmente. No se aplicaron migraciones a producción
-ni se publicaron versiones como parte de este cambio.
+El registro del despliegue y sus versiones está en el PR de publicación.
 
 ## Validación
 
