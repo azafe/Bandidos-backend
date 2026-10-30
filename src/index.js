@@ -34,6 +34,9 @@ import {
 } from "./auth/passwordResetService.js";
 import { createPasswordResetStore } from "./auth/passwordResetStore.js";
 import { uploadPhoto } from "./storage.js";
+import { registerEmployeePortalRoutes, restrictEmployeeAccess, validateEmployee } from "./employeePortal.js";
+import { registerChatRoutes } from "./chat.js";
+import { migrateEmployeeEcosystem, employeeMigrationNames } from "./employeeMigrations.js";
 import {
   BOOKING_SIZES,
   addDays,
@@ -108,6 +111,20 @@ async function sendPushToTenant(tenantId, payload, excludeDeviceId = null) {
   }
 }
 
+// Chat: audiencia explícita y activa; el contenido no sale en el push.
+async function sendPushToUsers(tenantId, userIds, payload) {
+  if (!vapidConfigured || !userIds.length) return;
+  const { rows } = await pool.query(`SELECT p.* FROM push_subscriptions p
+    JOIN users u ON u.id=p.user_id AND u.tenant_id=p.tenant_id
+    LEFT JOIN employees e ON e.tenant_id=u.tenant_id AND e.id=COALESCE(u.employee_id,u.chofer_id)
+    WHERE p.tenant_id=$1 AND p.user_id=ANY($2::uuid[])
+      AND (COALESCE(u.employee_id,u.chofer_id) IS NULL OR e.status='active')`,[tenantId,userIds]);
+  await Promise.allSettled(rows.map(async sub => {
+    try { await webpush.sendNotification({endpoint:sub.endpoint,keys:{p256dh:sub.p256dh,auth:sub.auth}},JSON.stringify(payload)); }
+    catch (e) { if ([404,410].includes(e.statusCode)) await pool.query('DELETE FROM push_subscriptions WHERE id=$1',[sub.id]); }
+  }));
+}
+
 const app = express();
 
 const corsOrigin = process.env.FRONTEND_ORIGIN || "*";
@@ -131,7 +148,8 @@ const createUserSchema = z.object({
   password: z.string().min(8).optional(),
   password_hash: z.string().min(1).optional(),
   role: assignableUserRoles,
-  chofer_id: z.string().uuid().nullable().optional()
+  chofer_id: z.string().uuid().nullable().optional(),
+  employee_id: z.string().uuid().nullable().optional()
 }).refine((data) => data.password || data.password_hash, {
   message: "password or password_hash is required"
 });
@@ -240,6 +258,8 @@ const createAgendaSchema = z.object({
   deposit_amount: z.coerce.number().min(0).optional().default(0),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
+  second_groomer_id: z.string().uuid().optional().nullable(),
+  third_groomer_id: z.string().uuid().optional().nullable(),
   status: agendaStatusSchema.optional().default("reserved"),
   traslado: z.boolean().optional().default(false),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
@@ -264,6 +284,8 @@ const createAgendaWithNewPetSchema = z.object({
   deposit_amount: z.coerce.number().min(0).optional().default(0),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   groomer_id: z.string().uuid().optional().nullable(),
+  second_groomer_id: z.string().uuid().optional().nullable(),
+  third_groomer_id: z.string().uuid().optional().nullable(),
   status: agendaStatusSchema.optional().default("reserved"),
   traslado: z.boolean().optional().default(false),
   traslado_direccion: z.preprocess(emptyStringToNull, z.string().nullable().optional()),
@@ -741,6 +763,19 @@ const buildUpdate = (allowedFields, payload) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+
+// Readiness pública sin datos del negocio: comprueba las migraciones que el
+// arranque debe haber confirmado antes de recibir tráfico.
+app.get("/health/employee-ecosystem", async (_req,res) => {
+  try {
+    const result=await pool.query('SELECT name FROM app_schema_migrations WHERE name=ANY($1::text[])',[employeeMigrationNames]);
+    const ready=result.rows.length===employeeMigrationNames.length;
+    res.set('Cache-Control','no-store').status(ready?200:503).json({ok:ready,release:'employee-ecosystem-v1',commit:process.env.RAILWAY_GIT_COMMIT_SHA || null});
+  } catch {
+    res.status(503).json({ok:false,release:'employee-ecosystem-v1'});
+  }
+});
+
 });
 
 app.get("/push/vapid-public-key", (_req, res) => {
@@ -811,6 +846,7 @@ app.post("/auth/login", async (req, res) => {
         email: user.email,
         role: user.role,
         chofer_id: user.chofer_id ?? null,
+        employee_id: user.employee_id ?? null,
         tenant_id: user.tenant_id ?? null,
         created_at: user.created_at
       }
@@ -1311,10 +1347,12 @@ app.use((req, res, next) => {
 
   pool.query(
     `SELECT u.role, u.tenant_id, t.status AS tenant_status, t.suspended_reason,
-            u.chofer_id, e.status AS chofer_status, e.is_driver
+            u.chofer_id, u.employee_id, e.status AS chofer_status, e.is_driver,
+            pe.status AS employee_status, pe.is_driver AS employee_is_driver, pe.name AS employee_name
      FROM users u
      LEFT JOIN tenants t ON t.id = u.tenant_id
      LEFT JOIN employees e ON e.tenant_id=u.tenant_id AND e.id=u.chofer_id
+     LEFT JOIN employees pe ON pe.tenant_id=u.tenant_id AND pe.id=u.employee_id
      WHERE u.id = $1`,
     [userId]
   )
@@ -1326,8 +1364,11 @@ app.use((req, res, next) => {
       const row = rows[0];
       req.user.role = row.role;
       req.tenantId = row.tenant_id ?? null;
-      req.driverId = row.chofer_id ?? null;
-      req.driverActive = row.chofer_status === "active" && row.is_driver === true;
+      req.employeeId = row.employee_id ?? null;
+      req.employeeActive = row.employee_status === "active";
+      req.employeeName = row.employee_name ?? null;
+      req.driverId = row.chofer_id || (row.employee_is_driver ? row.employee_id : null);
+      req.driverActive = row.chofer_id ? row.chofer_status === "active" && row.is_driver === true : req.employeeActive && row.employee_is_driver === true;
 
       // Si es super_admin y NO está en una ruta de superadmin (/v2/super/...),
       // ni en /me o /health, bloqueamos el acceso.
@@ -1365,7 +1406,10 @@ app.use((req, res, next) => {
     });
 });
 
+app.use(restrictEmployeeAccess);
 app.use(restrictDriverAccess);
+registerEmployeePortalRoutes(app, pool, requireRole);
+registerChatRoutes(app, pool, { sendPushToUsers });
 // Las rutas fijas deben registrarse antes de /v2/traslados/:id.
 registerTrasladosHistoricosRoutes(app, pool, requireRole);
 registerTrasladosOperacionRoutes(app, pool, requireRole);
@@ -1486,7 +1530,7 @@ app.get("/me", requireAuth, async (req, res) => {
       return sendError(res, 404, "User not found");
     }
 
-    res.json({ ...result.rows[0], chofer_id: req.driverId, chofer_activo: req.driverActive });
+    res.json({ ...result.rows[0], chofer_id: req.driverId, chofer_activo: req.driverActive, employee_id: req.employeeId, employee_active: req.employeeActive, employee_name: req.employeeName });
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -1883,7 +1927,7 @@ app.get("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
   const tenantClause = req.tenantId ? `WHERE tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      `SELECT id, email, role, tenant_id, created_at, chofer_id FROM users ${tenantClause} ORDER BY created_at DESC`,
+      `SELECT id, email, role, tenant_id, created_at, chofer_id, employee_id FROM users ${tenantClause} ORDER BY created_at DESC`,
       params
     );
     res.json(result.rows);
@@ -1898,7 +1942,7 @@ app.get("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => 
   const tenantClause = req.tenantId ? ` AND tenant_id = $${params.push(req.tenantId)}` : "";
   try {
     const result = await pool.query(
-      `SELECT id, email, role, tenant_id, created_at, chofer_id FROM users WHERE id = $1${tenantClause}`,
+      `SELECT id, email, role, tenant_id, created_at, chofer_id, employee_id FROM users WHERE id = $1${tenantClause}`,
       params
     );
     if (result.rowCount === 0) {
@@ -1918,10 +1962,20 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
     return sendError(res, 400, "Invalid request body");
   }
 
-  const { email, password, password_hash, role, chofer_id } = parsed.data;
+  const { email, password, password_hash, role, chofer_id, employee_id } = parsed.data;
   const passwordHash = password ? await hashPassword(password) : password_hash;
 
   try {
+    if (employee_id) {
+      if (chofer_id || !["staff", "user"].includes(role)) return sendError(res, 400, "Elegí una cuenta personal de equipo y un solo empleado.");
+      const saved = await transaction(pool, async (db) => {
+        await validateEmployee(db, req.tenantId, employee_id);
+        return (await db.query(`INSERT INTO users(email,password_hash,role,tenant_id,employee_id)
+          VALUES($1,$2,$3,$4,$5) RETURNING id,email,role,tenant_id,created_at,employee_id,chofer_id`,
+          [email,passwordHash,role,req.tenantId,employee_id])).rows[0];
+      });
+      return res.status(201).json(saved);
+    }
     if (chofer_id) {
       if (!["staff", "user"].includes(role)) return sendError(res, 400, "Usá una cuenta de equipo para el acceso de chofer.");
       const user = await transaction(pool, async (db) => {
@@ -1943,6 +1997,7 @@ app.post("/v2/users", requireAuth, requireRole("admin"), async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    if (err.status) return sendError(res, err.status, err.message);
     if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -1987,6 +2042,7 @@ app.put("/v2/users/:id", requireAuth, requireRole("admin"), async (req, res) => 
 
     res.json(result.rows[0]);
   } catch (err) {
+    if (sendTrasladoError(res, err)) return;
     console.error(err);
     sendError(res, 500, "Unexpected error");
   }
@@ -2017,7 +2073,10 @@ app.get("/v2/employees", async (req, res) => {
     const result = await pool.query(
       `SELECT * FROM employees ${tenantClause} ORDER BY created_at DESC`, params
     );
-    res.json(result.rows);
+    res.json(result.rows.map(row => {
+      if (req.user.role === "admin") return row;
+      const safe = { ...row }; delete safe.opening_balance; delete safe.payroll_start_date; return safe;
+    }));
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -2032,7 +2091,9 @@ app.get("/v2/employees/:id", async (req, res) => {
       `SELECT * FROM employees WHERE id = $1${tenantClause}`, params
     );
     if (result.rowCount === 0) return sendError(res, 404, "Employee not found");
-    res.json(result.rows[0]);
+    const employee = { ...result.rows[0] };
+    if (req.user.role !== "admin") { delete employee.opening_balance; delete employee.payroll_start_date; }
+    res.json(employee);
   } catch (err) {
     console.error(err);
     sendError(res, 500, "Unexpected error");
@@ -2675,6 +2736,7 @@ app.post("/agenda", async (req, res) => {
 
   applySolicitudSummary(parsed.data);
   if (!validateFinishedTraslado(res, parsed.data)) return;
+  if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
 
   const {
     date,
@@ -2714,11 +2776,14 @@ app.post("/agenda", async (req, res) => {
           traslado ?? false, traslado_direccion ?? null, traslado_amount ?? 0, traslado_bonificado
         ]
       );
-      const turno = result.rows[0];
+      let turno = result.rows[0];
+      if (parsed.data.second_groomer_id || parsed.data.third_groomer_id) {
+        turno = (await db.query("UPDATE agenda_turnos SET second_groomer_id=$3,third_groomer_id=$4 WHERE tenant_id=$1 AND id=$2 RETURNING *", [req.tenantId,turno.id,parsed.data.second_groomer_id ?? null,parsed.data.third_groomer_id ?? null])).rows[0];
+      }
       if (traslado) await syncAgendaTraslado(db, req.tenantId, turno, parsed.data, { isNew: true });
       return turno;
     };
-    const turnoCreado = traslado ? await transaction(pool, create) : await create(pool);
+    const turnoCreado = await transaction(pool, create);
     res.status(201).json(turnoCreado);
     const deviceId = req.headers["x-device-id"] || null;
     sendPushToTenant(req.tenantId, {
@@ -2741,6 +2806,7 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
 
   applySolicitudSummary(parsed.data);
   if (!validateFinishedTraslado(res, parsed.data)) return;
+  if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
 
   const {
     date, time, duration, service_type_id, payment_method_id, deposit_payment_method_id, price,
@@ -2781,7 +2847,10 @@ app.post("/v2/agenda/with-new-pet", async (req, res) => {
       ]
     );
 
-    const turno = turnoResult.rows[0];
+    let turno = turnoResult.rows[0];
+    if (parsed.data.second_groomer_id || parsed.data.third_groomer_id) {
+      turno = (await client.query("UPDATE agenda_turnos SET second_groomer_id=$3,third_groomer_id=$4 WHERE tenant_id=$1 AND id=$2 RETURNING *", [tenantId,turno.id,parsed.data.second_groomer_id ?? null,parsed.data.third_groomer_id ?? null])).rows[0];
+    }
     if (traslado) await syncAgendaTraslado(client, tenantId, turno, parsed.data, { isNew: true });
     await client.query("COMMIT");
     res.status(201).json(turno);
@@ -5449,6 +5518,7 @@ const port = process.env.PORT || 3000;
 export { app };
 
 if (process.env.NODE_ENV !== "test") {
+  await migrateEmployeeEcosystem(pool);
   app.listen(port, () => {
     console.log(`API running on :${port}`);
   });

@@ -16,12 +16,14 @@ const parse = (schema, value) => {
 // El vínculo se consulta en cada request. Un chofer inactivo conserva la
 // restricción: desactivarlo nunca le devuelve los permisos generales de staff.
 export function restrictDriverAccess(req, res, next) {
-  if (!req.driverId) return next();
+  if (!req.driverId || req.employeeId) return next();
   const path = req.path.replace(/\/+$/, "");
   if (req.method === "GET" && path === "/me") return next();
   if (!req.driverActive) {
     return res.status(403).json({ message: "Tu acceso de chofer está inactivo. Contactá al administrador." });
   }
+  if (path === "/v2/me/employee" && req.method === "GET") return next();
+  if (path === "/v2/chat" || path.startsWith("/v2/chat/")) return next();
   if ((req.method === "GET" && path === "/v2/traslados/hoja-de-ruta") ||
       (req.method === "PATCH" && /^\/v2\/traslados\/[a-f\d-]+\/estado$/i.test(path))) {
     return next();
@@ -169,7 +171,7 @@ export function registerTrasladosOperacionRoutes(app, pool, requireRole) {
       if (chofer_id && !["staff", "user"].includes(found.rows[0].role)) fail(400, "Usá una cuenta de equipo para el acceso de chofer.");
       await validateDriver(db, req.tenantId, chofer_id);
       const result = await db.query(
-        "UPDATE users SET chofer_id=$3 WHERE tenant_id=$1 AND id=$2 RETURNING id,email,role,chofer_id",
+        "UPDATE users SET chofer_id=$3,employee_id=NULL WHERE tenant_id=$1 AND id=$2 RETURNING id,email,role,chofer_id",
         [req.tenantId, id, chofer_id],
       );
       return result.rows[0];
