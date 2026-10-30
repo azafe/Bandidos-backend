@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import test from "node:test";
+import { signTokenFor, handleAuthRevalidation } from "./helpers/authRevalidation.js";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgresql://localhost:5432/postgres";
 process.env.JWT_SECRET ||= "test-secret";
+
+const { token } = signTokenFor({role:"admin",tenant_id:crypto.randomUUID()});
 
 const { app } = await import("../src/index.js");
 const { pool } = await import("../src/db.js");
@@ -18,6 +21,8 @@ const createEmployeesPoolMock = () => {
   const employees = new Map();
 
   const query = async (sql, params = []) => {
+    const auth = handleAuthRevalidation(sql, params);
+    if (auth) return auth;
     const normalized = normalizeSql(sql);
 
     if (normalized.startsWith("insert into employees")) {
@@ -38,7 +43,7 @@ const createEmployeesPoolMock = () => {
     }
 
     if (normalized.startsWith("update employees set")) {
-      const id = params[params.length - 1];
+      const id = params[params.length - 2];
       const employee = employees.get(id);
       if (!employee) {
         return { rowCount: 0, rows: [] };
@@ -84,7 +89,7 @@ const createEmployeesPoolMock = () => {
 const requestJson = async (baseUrl, path, { method = "GET", body } = {}) => {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   const json = await response.json();
