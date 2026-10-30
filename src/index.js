@@ -763,6 +763,7 @@ const buildUpdate = (allowedFields, payload) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
 
 // Readiness pública sin datos del negocio: comprueba las migraciones que el
 // arranque debe haber confirmado antes de recibir tráfico.
@@ -774,8 +775,6 @@ app.get("/health/employee-ecosystem", async (_req,res) => {
   } catch {
     res.status(503).json({ok:false,release:'employee-ecosystem-v1'});
   }
-});
-
 });
 
 app.get("/push/vapid-public-key", (_req, res) => {
