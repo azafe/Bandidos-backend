@@ -34,3 +34,24 @@ test('si falla el chat se revierte toda la migración antes de servir tráfico',
   assert.equal((await db.query("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='employee_id'")).rows.length,0);
   assert.deepEqual(await migrateEmployeeEcosystem(adapter(db),{log(){}}),employeeMigrationNames);
 });
+
+test('readiness pública disponible antes del primer health y 503 si falta una migración',async t=>{
+  process.env.NODE_ENV='test';
+  process.env.DATABASE_URL ||= 'postgresql://localhost:5432/unused';
+  process.env.JWT_SECRET ||= 'test-secret';
+  const {app}=await import('../src/index.js');
+  const {pool}=await import('../src/db.js');
+  const db=await createTrasladosDb({realAuth:true,employeeSchema:false});
+  await migrateEmployeeEcosystem(adapter(db),{log(){}});
+  const original=pool.query;pool.query=db.query;
+  const server=app.listen(0,'127.0.0.1');
+  await new Promise(r=>server.once('listening',r));
+  t.after(async()=>{await new Promise(r=>server.close(r));pool.query=original;await db.close();});
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const ready=await fetch(`${base}/health/employee-ecosystem`);
+  assert.equal(ready.status,200);assert.equal((await ready.json()).ok,true);
+  assert.deepEqual(await (await fetch(`${base}/health`)).json(),{ok:true});
+  await db.query('DELETE FROM app_schema_migrations WHERE name=$1',[employeeMigrationNames[1]]);
+  const incomplete=await fetch(`${base}/health/employee-ecosystem`);
+  assert.equal(incomplete.status,503);assert.equal((await incomplete.json()).ok,false);
+});
