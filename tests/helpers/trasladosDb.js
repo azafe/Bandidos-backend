@@ -51,6 +51,9 @@ export async function createTrasladosDb({ realAuth = false } = {}) {
   const statementsMigration = await readFile(new URL("../../db/migrations/029_traslados_rendiciones.sql", import.meta.url), "utf8");
   await db.exec(statementsMigration);
   await db.exec(statementsMigration);
+  const teamMigration = await readFile(new URL("../../db/migrations/031_equipo_organigrama.sql", import.meta.url), "utf8");
+  await db.exec(teamMigration);
+  await db.exec(teamMigration);
   await db.exec(await readFile(new URL("../../db/migrations/035_cuentas_personales.sql", import.meta.url), "utf8"));
   let tail = Promise.resolve();
   const acquire = async () => {

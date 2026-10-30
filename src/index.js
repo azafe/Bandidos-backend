@@ -23,6 +23,8 @@ import { tenantPushAudience } from "./pushAudience.js";
 import { registerTrasladosHistoricosRoutes } from "./trasladosHistoricos.js";
 import { registerTrasladosResultadosRoutes } from "./trasladosResultados.js";
 import { registerTrasladosRendicionesRoutes } from "./trasladosRendiciones.js";
+import { recordStockMovement, registerPetshopStockRoutes } from "./petshopStock.js";
+import { registerTeamRoutes } from "./team.js";
 import { createEmailClient } from "./email.js";
 import {
   createPasswordResetService,
@@ -165,6 +167,13 @@ const emptyStringToNull = (value) => {
   return value;
 };
 
+// Datos de legajo del módulo Equipo (031_equipo_organigrama.sql).
+const employeeFileFields = {
+  dni: z.preprocess(emptyStringToNull, z.string().trim().max(20).nullable().optional()),
+  hire_date: z.preprocess(emptyStringToNull, dateSchema.nullable().optional()),
+  end_date: z.preprocess(emptyStringToNull, dateSchema.nullable().optional())
+};
+
 const createEmployeeSchema = z.object({
   is_driver: z.boolean().optional(),
   name: z.string().min(1),
@@ -175,7 +184,8 @@ const createEmployeeSchema = z.object({
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
   // Tasa real de comisión del peluquero. Reemplaza al 0.40 que estaba
   // hardcodeado en el frontend y se aplicaba por igual a todos.
-  commission_rate: z.coerce.number().min(0).max(1).optional()
+  commission_rate: z.coerce.number().min(0).max(1).optional(),
+  ...employeeFileFields
 });
 
 const updateEmployeeSchema = z.object({
@@ -186,7 +196,8 @@ const updateEmployeeSchema = z.object({
   email: z.preprocess(emptyStringToNull, z.string().email().nullable().optional()),
   status: statusSchema.optional(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
-  commission_rate: z.coerce.number().min(0).max(1).optional()
+  commission_rate: z.coerce.number().min(0).max(1).optional(),
+  ...employeeFileFields
 });
 
 const createCustomerSchema = z.object({
@@ -285,6 +296,24 @@ const createAgendaWithNewPetSchema = z.object({
   owner_name: z.string().min(1),
   owner_phone: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional()),
 });
+
+async function validateSharedGroomer(db, tenantId, record, res) {
+  if (!record.second_groomer_id && !record.third_groomer_id) return true;
+  const participants = [record.groomer_id, record.second_groomer_id, record.third_groomer_id].filter(Boolean);
+  if (!record.groomer_id || !record.second_groomer_id || new Set(participants).size !== participants.length) {
+    sendError(res, 400, "Seleccioná entre dos y tres peluqueros distintos para compartir el servicio.");
+    return false;
+  }
+  const result = await db.query(
+    "SELECT id FROM employees WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND COALESCE(is_driver, false) = false",
+    [tenantId, participants]
+  );
+  if (result.rowCount !== participants.length) {
+    sendError(res, 400, "Todos los peluqueros deben pertenecer a esta sucursal y no ser choferes.");
+    return false;
+  }
+  return true;
+}
 
 const updateAgendaSchema = z.object({
   date: dateSchema.optional(),
@@ -443,6 +472,8 @@ const createServiceRecordSchema = z.object({
   price: z.coerce.number().min(0),
   payment_method_id: z.string().uuid(),
   groomer_id: z.string().uuid().optional().nullable(),
+  second_groomer_id: z.string().uuid().optional().nullable(),
+  third_groomer_id: z.string().uuid().optional().nullable(),
   notes: z.preprocess(emptyStringToNull, z.string().min(1).nullable().optional())
 });
 
@@ -1371,6 +1402,8 @@ registerTrasladosOperacionRoutes(app, pool, requireRole);
 registerTrasladosResultadosRoutes(app, pool, requireRole);
 registerTrasladosRendicionesRoutes(app, pool, requireRole);
 registerTrasladosRoutes(app, pool, requireRole);
+registerPetshopStockRoutes(app, pool);
+registerTeamRoutes(app, pool, requireRole);
 
 app.post("/push/subscribe", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
@@ -1641,10 +1674,10 @@ app.get("/reports/by-groomer", async (req, res) => {
       `SELECT
          e.id AS groomer_id,
          e.name AS groomer_name,
-         COUNT(s.id) AS services_count,
-         COALESCE(SUM(s.price), 0) AS total
+         SUM((1.0 / (1 + (s.second_groomer_id IS NOT NULL)::int + (s.third_groomer_id IS NOT NULL)::int))) AS services_count,
+         COALESCE(SUM(s.price / (1 + (s.second_groomer_id IS NOT NULL)::int + (s.third_groomer_id IS NOT NULL)::int)), 0) AS total
        FROM services s
-       LEFT JOIN employees e ON s.groomer_id = e.id
+       LEFT JOIN employees e ON e.id IN (s.groomer_id, s.second_groomer_id, s.third_groomer_id)
        ${whereClause}
        GROUP BY e.id, e.name
        ORDER BY total DESC`,
@@ -1742,7 +1775,7 @@ app.get("/services", async (req, res) => {
 
   if (groomerId) {
     params.push(groomerId);
-    filters.push(`groomer_id = $${params.length}`);
+    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length} OR third_groomer_id = $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -1772,14 +1805,17 @@ app.post("/services", async (req, res) => {
     price,
     payment_method_id,
     groomer_id,
+    second_groomer_id,
+    third_groomer_id,
     notes
   } = parsed.data;
 
   try {
+    if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
     const result = await pool.query(
       `INSERT INTO services
-        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id, third_groomer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
       [
         date,
@@ -1790,7 +1826,9 @@ app.post("/services", async (req, res) => {
         payment_method_id,
         groomer_id ?? null,
         notes ?? null,
-        req.tenantId
+        req.tenantId,
+        second_groomer_id ?? null,
+        third_groomer_id ?? null
       ]
     );
 
@@ -2053,14 +2091,14 @@ app.post("/v2/employees", requireRole("admin"), async (req, res) => {
   const parsed = createEmployeeSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { name, role, phone, email, status, notes, commission_rate, is_driver } = parsed.data;
+  const { name, role, phone, email, status, notes, commission_rate, is_driver, dni, hire_date, end_date } = parsed.data;
   try {
     const result = await pool.query(
-      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id, commission_rate, is_driver)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0.40), $9)
+      `INSERT INTO employees (name, role, phone, email, status, notes, tenant_id, commission_rate, is_driver, dni, hire_date, end_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0.40), $9, $10, $11, $12)
        RETURNING *`,
       [name, role, phone ?? null, email ?? null, status, notes ?? null, req.tenantId,
-       commission_rate ?? null, is_driver ?? false]
+       commission_rate ?? null, is_driver ?? false, dni ?? null, hire_date ?? null, end_date ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -2075,11 +2113,24 @@ app.put("/v2/employees/:id", requireRole("admin"), async (req, res) => {
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
   const updates = parsed.data;
-  const { fields, values, idx } = buildUpdate(
-    ["name", "role", "phone", "email", "status", "notes", "commission_rate", "is_driver"],
+  const built = buildUpdate(
+    ["name", "role", "phone", "email", "status", "notes", "commission_rate", "is_driver", "dni", "hire_date", "end_date"],
     updates
   );
+  const { fields, values } = built;
+  let { idx } = built;
   if (fields.length === 0) return sendError(res, 400, "No fields to update");
+  // Pasar a inactivo sin fecha de baja toma la de hoy; reactivar la limpia.
+  // Solo cuando el estado cambia (en el SET, "status" es el valor anterior):
+  // editar a alguien ya dado de baja no le pisa la fecha.
+  if (updates.end_date === undefined && updates.status !== undefined) {
+    fields.push(`end_date = CASE
+      WHEN $${idx} = 'inactive' AND status <> 'inactive' THEN ${AR_TODAY_SQL}
+      WHEN $${idx} = 'active' THEN NULL
+      ELSE end_date END`);
+    values.push(updates.status);
+    idx += 1;
+  }
 
   values.push(req.params.id);
   const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
@@ -2847,7 +2898,7 @@ app.put("/agenda/:id", async (req, res) => {
   let previousTurno;
   try {
     const trasladoFields = ["traslado", "traslado_direccion", "traslado_amount", "traslado_bonificado", "traslado_solicitud"];
-    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || trasladoFields.some((field) => Object.hasOwn(updates, field));
+    const checksTraslado = Object.hasOwn(updates, "status") || Object.hasOwn(updates, "date") || Object.hasOwn(updates, "groomer_id") || Object.hasOwn(updates, "second_groomer_id") || Object.hasOwn(updates, "third_groomer_id") || trasladoFields.some((field) => Object.hasOwn(updates, field));
     if (checksTraslado) {
       client = await pool.connect();
       await client.query("BEGIN");
@@ -2862,6 +2913,10 @@ app.put("/agenda/:id", async (req, res) => {
       const previous = current.rows[0];
       previousTurno = previous;
       const next = { ...previous, ...updates };
+      if (!(await validateSharedGroomer(client, req.tenantId, next, res))) {
+        await client.query("ROLLBACK");
+        return;
+      }
       const changedTraslado = trasladoFields.some((field) => {
         if (!Object.hasOwn(updates, field)) return false;
         return field === "traslado_amount"
@@ -3361,14 +3416,35 @@ app.post("/v2/petshop/products", async (req, res) => {
   const parsed = createPetshopProductSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
   const { name, sku, category, supplier_id, cost, price, stock, stock_min } = parsed.data;
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+    const result = await client.query(
       `INSERT INTO petshop_products (name, sku, category, supplier_id, cost, price, stock, stock_min, tenant_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [name, sku ?? null, category ?? null, supplier_id ?? null, cost ?? 0, price, stock ?? 0, stock_min ?? 0, req.tenantId]
     );
+    // El stock con el que se da de alta queda en el historial. No cuenta como
+    // conteo: el producto sigue "sin contar" hasta que alguien lo cuente.
+    if ((stock ?? 0) > 0) {
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId: result.rows[0].id,
+        kind: "inicial",
+        delta: stock,
+        userId: req.user?.sub ?? null,
+        note: "Stock al crear el producto",
+      });
+    }
+    await client.query("COMMIT");
     res.status(201).json(result.rows[0]);
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
 });
 
 app.put("/v2/petshop/products/:id", async (req, res) => {
@@ -3382,24 +3458,75 @@ app.put("/v2/petshop/products/:id", async (req, res) => {
   values.push(req.params.id);
   const tenantClause = ` AND tenant_id = $${values.push(req.tenantId)}`;
   const updateFields = [...fields, "updated_at = now()"];
+  // Cambiar el stock a mano deja un ajuste en el historial con la diferencia.
+  if (parsed.data.stock === undefined) {
+    try {
+      const result = await pool.query(
+        `UPDATE petshop_products SET ${updateFields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
+      );
+      if (result.rowCount === 0) return sendError(res, 404, "Product not found");
+      return res.json(result.rows[0]);
+    } catch (err) { console.error(err); return sendError(res, 500, "Unexpected error"); }
+  }
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+    const locked = await lockProducts(client, req.tenantId, [req.params.id]);
+    const previous = locked.get(String(req.params.id));
+    if (!previous) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Product not found");
+    }
+    const result = await client.query(
       `UPDATE petshop_products SET ${updateFields.join(", ")} WHERE id = $${idx}${tenantClause} RETURNING *`, values
     );
-    if (result.rowCount === 0) return sendError(res, 404, "Product not found");
+    const delta = Number(parsed.data.stock) - Number(previous.stock);
+    if (delta !== 0) {
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId: req.params.id,
+        kind: "ajuste",
+        delta,
+        userId: req.user?.sub ?? null,
+        note: "Stock editado desde el producto",
+      });
+    }
+    await client.query("COMMIT");
     res.json(result.rows[0]);
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
 });
 
 app.delete("/v2/petshop/products/:id", async (req, res) => {
   if (!req.tenantId) return sendError(res, 403, "No tenant context");
   const params = [req.params.id];
   const tenantClause = ` AND tenant_id = $${params.push(req.tenantId)}`;
+  const client = await pool.connect();
   try {
-    const result = await pool.query(`DELETE FROM petshop_products WHERE id = $1${tenantClause}`, params);
-    if (result.rowCount === 0) return sendError(res, 404, "Product not found");
+    await client.query("BEGIN");
+    // El historial de stock no impide borrar un producto sin ventas: se va
+    // con él. Con ventas, la FK de petshop_sale_items lo sigue impidiendo.
+    await client.query(`DELETE FROM petshop_stock_movements WHERE product_id = $1${tenantClause}`, params);
+    const result = await client.query(`DELETE FROM petshop_products WHERE id = $1${tenantClause}`, params);
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return sendError(res, 404, "Product not found");
+    }
+    await client.query("COMMIT");
     res.json({ ok: true });
-  } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if (err?.code === "23503") return sendError(res, 409, "El producto tiene ventas registradas");
+    console.error(err);
+    sendError(res, 500, "Unexpected error");
+  } finally {
+    client.release();
+  }
 });
 
 app.get("/v2/petshop/sales", async (req, res) => {
@@ -3491,6 +3618,14 @@ app.post("/v2/petshop/sales", async (req, res) => {
          WHERE id = $2 AND tenant_id = $3`,
         [item.quantity, item.product_id, req.tenantId]
       );
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId: item.product_id,
+        kind: "venta",
+        delta: -Number(item.quantity),
+        userId: req.user?.sub ?? null,
+        saleId: sale.id,
+      });
     }
 
     await client.query("COMMIT");
@@ -3601,6 +3736,15 @@ app.put("/v2/petshop/sales/:id", async (req, res) => {
            WHERE id = $2 AND tenant_id = $3`,
           [delta, productId, req.tenantId]
         );
+        await recordStockMovement(client, {
+          tenantId: req.tenantId,
+          productId,
+          kind: delta > 0 ? "devolucion" : "venta",
+          delta,
+          userId: req.user?.sub ?? null,
+          saleId: req.params.id,
+          note: "Venta editada",
+        });
       }
 
       await client.query(`DELETE FROM petshop_sale_items WHERE sale_id = $1`, [req.params.id]);
@@ -3697,6 +3841,15 @@ app.delete("/v2/petshop/sales/:id", async (req, res) => {
          WHERE id = $2 AND tenant_id = $3`,
         [quantity, productId, req.tenantId]
       );
+      await recordStockMovement(client, {
+        tenantId: req.tenantId,
+        productId,
+        kind: "devolucion",
+        delta: quantity,
+        userId: req.user?.sub ?? null,
+        saleId: req.params.id,
+        note: "Venta borrada",
+      });
     }
 
     // petshop_sale_items cae por CASCADE.
@@ -3779,17 +3932,19 @@ app.post("/v2/petshop/stock-movements", async (req, res) => {
       [newStock, product_id, req.tenantId]
     );
 
-    const movementResult = await client.query(
-      `INSERT INTO petshop_stock_movements
-       (date, product_id, type, quantity, note, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [date, product_id, type, quantity, note ?? null, req.tenantId]
-    );
+    const movement = await recordStockMovement(client, {
+      tenantId: req.tenantId,
+      productId: product_id,
+      kind: type === "in" ? "ingreso" : type === "out" ? "merma" : "ajuste",
+      delta: newStock - Number(product.stock),
+      userId: req.user?.sub ?? null,
+      note: note ?? null,
+      date,
+    });
 
     await client.query("COMMIT");
     res.status(201).json({
-      movement: movementResult.rows[0],
+      movement,
       product: updateResult.rows[0]
     });
   } catch (err) {
@@ -3845,7 +4000,7 @@ app.get("/v2/services", async (req, res) => {
 
   if (groomerId) {
     params.push(groomerId);
-    filters.push(`groomer_id = $${params.length}`);
+    filters.push(`(groomer_id = $${params.length} OR second_groomer_id = $${params.length} OR third_groomer_id = $${params.length})`);
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -3875,12 +4030,13 @@ app.post("/v2/services", async (req, res) => {
   const parsed = createServiceRecordSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, 400, "Invalid request body");
 
-  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes } = parsed.data;
+  const { date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, second_groomer_id, third_groomer_id, notes } = parsed.data;
   try {
+    if (!(await validateSharedGroomer(pool, req.tenantId, parsed.data, res))) return;
     const result = await pool.query(
-      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId]
+      `INSERT INTO services (date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id, notes, tenant_id, second_groomer_id, third_groomer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [date, pet_id, customer_id, service_type_id, price, payment_method_id, groomer_id ?? null, notes ?? null, req.tenantId, second_groomer_id ?? null, third_groomer_id ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error(err); sendError(res, 500, "Unexpected error"); }
